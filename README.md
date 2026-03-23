@@ -1,48 +1,23 @@
-# pico-mini
+# 🍎 mac code
 
-**Run a 35-billion parameter AI agent on a $600 Mac mini — for free.**
+**Claude Code, but it runs on your Mac for free.**
 
-No cloud. No API keys. No subscription. Just your Mac.
+An AI coding agent with web search, file operations, and code execution — powered entirely by a 35-billion parameter model running locally on Apple Silicon. No cloud. No API keys. No subscription.
 
 ---
 
-## The Discovery
+## What is this?
 
-We proved that Apple Silicon's unified memory architecture lets you run models that **don't fit in RAM** by paging from SSD — and it's fast. This is the "LLM in a Flash" thesis tested in practice.
+mac code is like Claude Code, but instead of paying per token, the LLM runs on your desk. It uses **Qwen3.5-35B-A3B** — a Mixture-of-Experts model with 35B total parameters but only 3B active per token — running locally via SSD flash-paging on Apple Silicon at **30 tokens/second**.
 
 | Setup | Speed | Cost/hr | How |
 |---|---|---|---|
-| **pico-mini (Mac mini M4, 16GB)** | **29.8 tok/s** | **$0.00** | **SSD paging** |
-| NVIDIA GPU in-VRAM (RunPod) | 42.5 tok/s | $0.34 | Fits in VRAM |
+| **mac code (Mac mini M4, 16GB)** | **29.8 tok/s** | **$0.00** | **SSD paging** |
+| Claude Code (Anthropic API) | ~80 tok/s | ~$0.50+ | Cloud API |
+| NVIDIA GPU in-VRAM (RunPod) | 42.5 tok/s | $0.34 | Cloud GPU |
 | NVIDIA GPU + NVMe (Vast.ai) | 1.6 tok/s | $0.44 | NVMe paging |
-| NVIDIA GPU + FUSE (RunPod) | 0.075 tok/s | $0.44 | Network paging |
 
-**Apple Silicon SSD paging is 18.6x faster than NVIDIA NVMe paging.**
-
-Why? On NVIDIA, paging forces computation onto the CPU — bottleneck. On Apple Silicon, the GPU processes all layers via unified memory regardless of whether data is in RAM or paging from SSD.
-
-### The Model
-
-**Qwen3.5-35B-A3B** — a Mixture-of-Experts model with 35 billion total parameters but only **3 billion active per token**. This is key: MoE means only a fraction of the model is "hot" at any time, making SSD paging practical.
-
-- 10.6 GB on disk (IQ2_M quantization)
-- 16 GB RAM available, ~11 GB used by model, ~5 GB paging from SSD
-- 256 experts, 8 selected per token
-- Outperforms dense models 3x its active size on reasoning benchmarks
-
-### Math Accuracy
-
-We ran 212 math problems verified computationally with SymPy:
-
-| Category | Score |
-|---|---|
-| Linear Algebra | **100%** (22/22) |
-| Number Theory | **100%** (22/22) |
-| Logic | **100%** (20/20) |
-| Differential Equations | 95% |
-| Geometry | 91% |
-| Algebra | 86% |
-| **Overall** | **86.3%** (183/212) |
+The model doesn't even fit in RAM. macOS pages it from the SSD — and Apple Silicon's unified memory architecture means the GPU still processes everything. **18.6x faster than NVIDIA NVMe paging.**
 
 ---
 
@@ -53,7 +28,7 @@ We ran 212 math problems verified computationally with SymPy:
 - Mac with Apple Silicon (M1 or later, 16GB+ RAM)
 - [Homebrew](https://brew.sh)
 
-### Option A: One-command setup
+### One-command setup
 
 ```bash
 git clone https://github.com/walter-grace/pico-mini.git
@@ -61,9 +36,9 @@ cd pico-mini
 chmod +x setup.sh && ./setup.sh
 ```
 
-### Option B: Step by step
+### Or step by step
 
-**Step 1 — Install llama.cpp and download the model**
+**1 — Install llama.cpp and download the model**
 
 ```bash
 brew install llama.cpp
@@ -77,9 +52,9 @@ hf_hub_download('unsloth/Qwen3.5-35B-A3B-GGUF',
 "
 ```
 
-> The model is 10.6 GB. Download takes 5-15 minutes.
+> 10.6 GB download. Takes 5-15 minutes.
 
-**Step 2 — Start the inference server**
+**2 — Start the inference server**
 
 ```bash
 llama-server \
@@ -89,106 +64,149 @@ llama-server \
     --n-gpu-layers 99 --reasoning off -np 1 -t 4
 ```
 
-> Wait for "server is listening on http://127.0.0.1:8000". Takes ~20 seconds.
+> Wait for "server is listening". ~20 seconds.
 
-**Step 3 — Build PicoClaw (agent framework)**
+**3 — Build the agent backend**
 
 ```bash
 git clone https://github.com/sipeed/picoclaw.git
 cd picoclaw && make deps && make build && cd ..
 ```
 
-> Requires Go 1.25+. Install with `brew install go` if needed.
+> Needs Go 1.25+. Install with `brew install go` if needed.
 
-**Step 4 — Configure the agent**
+**4 — Configure**
 
 ```bash
 mkdir -p ~/.picoclaw/workspace
 cp config.example.json ~/.picoclaw/config.json
 ```
 
-**Step 5 — Run**
+**5 — Run**
 
 ```bash
 python3 agent.py
 ```
 
-That's it. You're chatting with a 35B AI agent running on your desk.
+That's it. You have a local AI coding agent on your Mac.
 
 ---
 
-## What's Included
+## What it looks like
 
-| File | What it does |
-|---|---|
-| `agent.py` | Interactive agent with web search, file ops, code execution, animated loading, markdown rendering |
-| `chat.py` | Lightweight streaming chat — direct to the LLM, no tools |
-| `dashboard.py` | Real-time server monitor — tok/s, GPU slots, memory, sparkline graphs |
-| `config.example.json` | Agent config pointing at local llama-server with DuckDuckGo search + fetch MCP servers |
-| `setup.sh` | One-command install script |
+```
+  🍎 mac code
+  claude code, but it runs on your Mac for free
 
-### Agent Commands
+  model  Qwen3.5-35B-A3B  MoE 34.7B · 3B active · IQ2_M
+  tools  search · fetch · exec · files
+  cost   $0.00/hr  Apple M4 Metal · localhost:8000
+
+  ──────────────────────────────────────────────────
+
+  agent > search the web for the latest Qwen 3.5 news
+
+  ⠹ searching the web  8s
+    llm_request model=qwen3.5-35b-a3b
+    tool_call web_search "Qwen 3.5 latest news"
+    tool_result received
+
+  thinking → searching the web → thinking → finishing up
+
+  Alibaba released Qwen3.5, a new series of AI models with
+  advanced agentic capabilities...
+
+  29.7 tok/s  ·  142 tokens  ·  4.8s
+```
+
+## Commands
 
 | Command | Action |
 |---|---|
 | `/agent` | Agent mode — web search, file ops, shell exec (default) |
 | `/raw` | Raw mode — direct streaming to LLM, no tools |
 | `/tools` | List available tools |
-| `/stats` | Session statistics (tok/s, tokens, turns) |
+| `/stats` | Session statistics |
 | `/clear` | Reset conversation |
 | `/system <msg>` | Set system prompt |
 | `/quit` | Exit |
 
-### Agent Tools
+## Tools
 
-All tools run locally. No API keys required.
+All local. No API keys.
 
-- **Web search** — DuckDuckGo via MCP server
-- **URL fetch** — Read any webpage
-- **Shell exec** — Run commands
-- **File read/write/edit** — Full filesystem access
-- **Subagent** — Spawn sub-tasks
+| Tool | What it does |
+|---|---|
+| `web_search` | DuckDuckGo search |
+| `web_fetch` | Read any URL |
+| `exec` | Run shell commands |
+| `read_file` | Read local files |
+| `write_file` | Create files |
+| `edit_file` | Modify files |
+| `list_dir` | Browse directories |
+| `subagent` | Spawn sub-tasks |
 
 ---
 
-## Architecture
+## Files
+
+| File | What |
+|---|---|
+| `agent.py` | The main agent — animated loading, live logs, markdown, tools |
+| `chat.py` | Lightweight streaming chat (no tools) |
+| `dashboard.py` | Real-time server monitor with tok/s sparklines |
+| `config.example.json` | Agent config with DuckDuckGo + fetch MCP servers |
+| `setup.sh` | One-command install |
+
+---
+
+## How it works
+
+### "LLM in a Flash" on Apple Silicon
+
+The model is 10.6 GB. Your Mac has 16 GB RAM. After the OS takes ~4 GB, there's not enough room. macOS pages the overflow from the SSD.
+
+On NVIDIA, this kills performance (1.6 tok/s) because paging forces computation onto the CPU. On Apple Silicon, the GPU processes all layers via **unified memory** regardless of whether data is in RAM or paging from SSD. Result: **29.8 tok/s while paging 5.4 GB from SSD**.
+
+### Why MoE matters
+
+Qwen3.5-35B-A3B has 256 experts but only activates 8 per token (3B of 35B parameters). This means:
+- Only a small fraction of the model is "hot" at any time
+- Hot experts stay cached in RAM
+- Cold experts page from SSD on demand
+- Effective compute is 3B per token, but you get 35B-class intelligence
+
+### Architecture
 
 ```
 ┌──────────────────────────────────────────────┐
-│  pico-mini TUI          Python + Rich        │
-│  Animated loading, markdown, streaming       │
+│  mac code TUI           Python + Rich        │
 ├──────────────────────────────────────────────┤
 │  PicoClaw               Go agent framework   │
 │  github.com/sipeed/picoclaw                  │
-│  Tool use, web search, MCP, sessions         │
 ├──────────────────────────────────────────────┤
 │  llama.cpp              C++ + Metal GPU      │
 │  github.com/ggergov/llama.cpp                │
-│  OpenAI-compatible API @ localhost:8000      │
 ├──────────────────────────────────────────────┤
 │  Qwen3.5-35B-A3B        MoE model           │
-│  huggingface.co/Qwen                         │
 │  34.7B params, 3B active, IQ2_M quant       │
 ├──────────────────────────────────────────────┤
-│  Apple Silicon           M1/M2/M3/M4         │
-│  Unified memory + Metal GPU + SSD paging     │
+│  Apple Silicon           Unified Memory      │
+│  Metal GPU + SSD flash paging                │
 └──────────────────────────────────────────────┘
 ```
 
-pico-mini is a **recipe and proof-of-concept**, not a framework. The unique contribution is:
-
-1. **The benchmark data** proving Apple Silicon flash-paging works 18.6x faster than NVIDIA
-2. **The specific model/quant/config combination** that makes 35B parameters work on 16GB RAM
-3. **The TUI wrapper** with animated loading, live logs, and markdown rendering
-4. **The 212-problem math eval** with SymPy verification
-
-The heavy lifting is done by open-source projects we gratefully build on.
-
 ---
 
-## Smaller Hardware?
+## Scaling
 
-Only 8GB RAM? Use the dense 9B model instead (fits entirely in memory):
+| Mac | RAM | Model | Speed |
+|---|---|---|---|
+| Mac mini M4 | 16 GB | 35B-A3B IQ2_M (this project) | ~30 tok/s |
+| Mac mini M4 Pro | 48 GB | 35B-A3B Q4_K_M | ~40+ tok/s |
+| Mac Studio M4 Ultra | 192 GB | 397B-A17B (frontier) | ~15-30 tok/s |
+
+### Smaller hardware (8GB)
 
 ```bash
 python3 -c "
@@ -204,32 +222,23 @@ llama-server \
     --n-gpu-layers 99 --reasoning off -t 4
 ```
 
-The agent auto-detects whichever model is running.
+mac code auto-detects whichever model is running.
 
 ---
 
-## Bigger Hardware?
+## Benchmarks
 
-| Mac | RAM | What you can run | Expected speed |
-|---|---|---|---|
-| Mac mini M4 | 16 GB | Qwen3.5-35B-A3B (this project) | ~30 tok/s |
-| Mac mini M4 Pro | 48 GB | Qwen3.5-35B-A3B Q4_K_M (better quality) | ~40+ tok/s |
-| Mac Studio M4 Ultra | 192 GB | Qwen3.5-397B-A17B (frontier model) | ~15-30 tok/s |
+212 math problems verified with SymPy:
 
-The same recipe scales. More RAM = bigger models = less paging = faster.
-
----
-
-## How It Works: "LLM in a Flash"
-
-Apple's 2023 paper ["LLM in a Flash"](https://arxiv.org/abs/2312.11514) proposed running LLMs larger than available RAM by intelligently loading model weights from flash storage. Our results validate this on real hardware:
-
-1. **Unified memory** — Apple Silicon shares RAM between CPU and GPU. No PCIe copy bottleneck.
-2. **Metal GPU** — All model layers run on the GPU via Metal, even when data pages from SSD.
-3. **MoE sparsity** — Only 3B of 35B parameters activate per token. Hot experts stay cached in RAM; cold experts page from SSD on demand.
-4. **SSD bandwidth** — The M4's SSD reads at 3-5 GB/s, fast enough to feed the GPU between token generations.
-
-The result: **29.8 tok/s while actively paging 5.4 GB from SSD** (9,704 pageouts observed). This is conversational speed — fast enough for interactive use.
+| Category | Score |
+|---|---|
+| Linear Algebra | **100%** (22/22) |
+| Number Theory | **100%** (22/22) |
+| Logic | **100%** (20/20) |
+| Differential Equations | 95% |
+| Geometry | 91% |
+| Algebra | 86% |
+| **Overall** | **86.3%** (183/212) |
 
 ---
 
@@ -239,10 +248,8 @@ MIT
 
 ## Credits
 
-This project is built entirely on open-source work:
-
-- **[Qwen3.5](https://huggingface.co/Qwen)** by Alibaba — the model
-- **[llama.cpp](https://github.com/ggergov/llama.cpp)** by Georgi Gerganov — inference engine with Metal support
-- **[PicoClaw](https://github.com/sipeed/picoclaw)** by Sipeed — agent framework with tool use and MCP
-- **[Unsloth](https://huggingface.co/unsloth)** — optimized GGUF quantizations
-- **[Rich](https://github.com/Textualize/rich)** by Will McGugan — terminal UI rendering
+- **[Qwen3.5](https://huggingface.co/Qwen)** — the model (Alibaba)
+- **[llama.cpp](https://github.com/ggergov/llama.cpp)** — inference engine (Georgi Gerganov)
+- **[PicoClaw](https://github.com/sipeed/picoclaw)** — agent framework (Sipeed)
+- **[Unsloth](https://huggingface.co/unsloth)** — GGUF quantizations
+- **[Rich](https://github.com/Textualize/rich)** — terminal UI (Will McGugan)

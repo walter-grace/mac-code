@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-pico-mini — Local AI agent on a Mac mini
+mac code — claude code for your Mac
 """
 
 import json, sys, os, time, subprocess, re, threading, queue
@@ -162,7 +162,7 @@ def stream_llm(messages):
     return full, tokens, time.time() - start
 
 # ── picoclaw agent call with LIVE log streaming ───
-def picoclaw_call_live(message, session="pico-mini"):
+def picoclaw_call_live(message, session="mac-code"):
     """Run picoclaw with real-time log streaming into animated display."""
     # Use -d (debug) flag so picoclaw emits detailed logs to stdout
     cmd = [PICOCLAW, "agent", "-m", message, "-s", session, "-d"]
@@ -225,13 +225,13 @@ def print_banner(model_name, model_detail):
     console.print()
     logo = Text()
     logo.append("  \U0001f34e ", style="default")
-    logo.append("pico", style="bold bright_cyan")
-    logo.append("-", style="dim")
-    logo.append("mini", style="bold bright_yellow")
+    logo.append("mac", style="bold bright_cyan")
+    logo.append(" ", style="default")
+    logo.append("code", style="bold bright_yellow")
     console.print(logo)
 
     sub = Text()
-    sub.append("  AI agent running locally on your Mac", style="dim italic")
+    sub.append("  claude code, but it runs on your Mac for free", style="dim italic")
     console.print(sub)
     console.print()
 
@@ -315,7 +315,7 @@ def main():
     session_tokens = 0
     session_time = 0.0
     session_turns = 0
-    session_id = f"pm-{int(time.time())}"
+    session_id = f"mc-{int(time.time())}"
     use_agent = True
 
     while True:
@@ -336,7 +336,7 @@ def main():
             break
         elif cmd == "/clear":
             messages.clear()
-            session_id = f"pm-{int(time.time())}"
+            session_id = f"mc-{int(time.time())}"
             console.clear()
             print_banner(model_name, model_detail)
             console.print("  [dim]cleared.[/]\n")
@@ -468,7 +468,7 @@ def main():
     if session_turns > 0:
         avg = session_tokens / session_time if session_time > 0 else 0
         console.print(
-            f"  \U0001f34e [bold bright_cyan]pico[/][dim]-[/][bold bright_yellow]mini[/]"
+            f"  \U0001f34e [bold bright_cyan]mac[/] [bold bright_yellow]code[/]"
             f"  [dim]{session_turns} turns · {session_tokens:,} tokens · {avg:.1f} tok/s[/]"
         )
     console.print()

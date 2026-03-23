@@ -1,9 +1,9 @@
 #!/bin/bash
-# pico-mini setup — one-command install
+# mac code setup — one-command install
 set -e
 
 echo ""
-echo "  pico-mini setup"
+echo "  🍎 mac code setup"
 echo "  ─────────────────────"
 echo ""
 
