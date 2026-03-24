@@ -164,8 +164,7 @@ def stream_llm(messages):
 # ── picoclaw agent call with LIVE log streaming ───
 def picoclaw_call_live(message, session="mac-code"):
     """Run picoclaw with real-time log streaming into animated display."""
-    # Use -d (debug) flag so picoclaw emits detailed logs to stdout
-    cmd = [PICOCLAW, "agent", "-m", message, "-s", session, "-d"]
+    cmd = [PICOCLAW, "agent", "-m", message, "-s", session]
     display = WorkingDisplay()
     all_lines = []
 
@@ -198,25 +197,31 @@ def picoclaw_call_live(message, session="mac-code"):
 
     reader.join(timeout=2)
 
-    # Parse: join all output, strip ANSI, take LAST lobster section (the actual response)
+    # Parse: strip ANSI, find lobster emoji, take text after it
     raw = "".join(all_lines)
     clean = strip_ansi(raw)
-    parts = clean.split("\U0001f99e")
-    if len(parts) >= 2:
-        # Last lobster section is the actual AI response
-        response = parts[-1].strip()
+
+    idx = clean.rfind("\U0001f99e")  # last lobster emoji
+    if idx >= 0:
+        response = clean[idx:].lstrip("\U0001f99e").strip()
+        # If it starts with "Error:" it's a picoclaw error, not a model response
+        if response.startswith("Error:"):
+            # Extract the useful part of the error
+            response = f"[agent error] {response[:200]}"
     else:
-        # No lobster found — fallback: skip log/banner lines
+        # No lobster — take non-banner lines
         lines = clean.split("\n")
         resp = []
+        past = False
         for line in lines:
             s = line.strip()
-            if s and not any(k in s for k in [
-                "██", "╔", "╚", "╝", "║", "DBG", "INF", "ERR", "WRN",
-                "pkg/", "cmd/", "Debug mode", "picoclaw",
-            ]):
+            if not past:
+                if not s or any(c in s for c in ["██", "╔", "╚", "╝", "║"]):
+                    continue
+                past = True
+            if past and s:
                 resp.append(s)
-        response = "\n".join(resp[-20:]).strip()  # take last 20 clean lines
+        response = "\n".join(resp).strip()
 
     return response, display.events
 
