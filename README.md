@@ -460,14 +460,26 @@ llama-server \
 
 Expected: **60-90 tok/s**. Report results in an issue.
 
-### MLX backend (est. 2x speedup)
+### MLX backend
 
-Apple's MLX framework is [21-87% faster than llama.cpp](https://arxiv.org/abs/2511.05502) on Apple Silicon due to zero-copy unified memory operations. We include an MLX drop-in replacement:
+We benchmarked Apple's [MLX framework](https://arxiv.org/abs/2511.05502) against llama.cpp on the same hardware:
+
+| Model | llama.cpp | MLX | Winner |
+|---|---|---|---|
+| **9B** | 16 tok/s | **20 tok/s** | **MLX (+25%)** |
+| **35B MoE** | **29 tok/s** | Won't fit (4-bit too large) | **llama.cpp** |
+
+**Why llama.cpp wins for the 35B:** MLX's smallest quantization is 4-bit (4.0 bpw). Our 35B MoE uses IQ2_M (2.6 bpw) to fit in 16GB. Only llama.cpp supports quantizations below 3-bit.
+
+**When to use MLX:**
+- **9B model** — 25% faster out of the box
+- **48GB+ Macs** — run the 35B at 4-bit quantization for better quality AND speed
+- **Any model that fits in RAM** — MLX's zero-copy tensors avoid llama.cpp's Metal overhead
 
 ```bash
 pip3 install mlx-lm
-python3 mlx_server.py              # 9B at ~32 tok/s
-python3 mlx_server.py --model 35b  # 35B at ~60 tok/s (estimated)
+python3 mlx_server.py              # 9B at ~20 tok/s (25% faster)
+python3 mlx_server.py --model 35b  # 35B — needs 48GB+ Mac
 ```
 
 Same OpenAI-compatible API at localhost:8000. `agent.py` works with either backend.
