@@ -9,4 +9,11 @@ picoclaw/
 *.json
 !config.example.json
 /conversations/
-research/
+research/results.tsv
+research/kv_lab.py
+research/experiment.py
+research/harness.py
+research/planner.py
+research/techniques.py
+research/lean_prompts.py
+research/program.md
