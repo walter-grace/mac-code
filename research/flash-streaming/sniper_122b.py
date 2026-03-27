@@ -161,69 +161,66 @@ class SniperEngine:
             self.expert_handles[layer_idx] = safe_open(str(path), framework="pt", device="cpu")
         return self.expert_handles[layer_idx]
 
-    def load_expert(self, layer_idx, expert_id):
-        """Load a single expert's weights from NVMe. Returns dict on CPU."""
-        cached = self.expert_cache.get(layer_idx, expert_id)
-        if cached is not None:
-            return cached
+    def load_active_experts(self, layer_idx, expert_ids):
+        """
+        Load only the active experts from the stacked tensor.
 
+        Expert tensors are stored as [256, out, in]. We index with expert_ids
+        to get [top_k, out, in] — loading only the rows we need.
+        """
         handle = self._get_expert_handle(layer_idx)
-        expert = {}
+        ids = expert_ids.cpu().tolist()
+
+        result = {}
         for proj in ["gate_proj", "up_proj", "down_proj"]:
             for comp in ["weight", "scales", "biases"]:
-                key = f"{expert_id}.{proj}.{comp}"
-                expert[f"{proj}.{comp}"] = handle.get_tensor(key)
+                key = f"{proj}.{comp}"
+                full = handle.get_tensor(key)  # [256, out, in]
+                # Index only active experts: [top_k, out, in]
+                result[key] = full[ids].to(self.device)
 
-        self.expert_cache.put(layer_idx, expert_id, expert)
-        return expert
-
-    def dequant_expert_proj(self, expert, proj_name):
-        """Dequantize one projection of an expert to float16 on GPU."""
-        w = expert[f"{proj_name}.weight"].to(self.device)
-        s = expert[f"{proj_name}.scales"].to(self.device)
-        b = expert[f"{proj_name}.biases"].to(self.device)
-        return dequantize_4bit(w, s, b, GROUP_SIZE)
+        return result
 
     def run_expert_ffn(self, x, layer_idx, expert_ids, expert_weights):
         """
-        Run MoE FFN for one token.
+        Run MoE FFN for one token using stacked expert tensors.
+
+        Expert weights are [256, out, in] on disk. We load only the 8 active
+        rows, dequantize on GPU, run SwiGLU, weight by router scores.
 
         x: [1, 1, hidden_size] on GPU
         expert_ids: [1, 1, top_k] tensor of expert indices
         expert_weights: [1, 1, top_k] tensor of routing weights
-
         Returns: [1, 1, hidden_size] on GPU
         """
-        ids = expert_ids[0, 0].tolist()  # list of top_k expert indices
-        weights = expert_weights[0, 0]   # [top_k] on GPU
+        ids = expert_ids[0, 0]        # [top_k] on GPU
+        weights = expert_weights[0, 0]  # [top_k] on GPU
+        k = ids.shape[0]
 
-        # Load experts (from NVMe or cache)
-        experts = []
-        for eid in ids:
-            experts.append(self.load_expert(layer_idx, eid))
+        # Load active expert slices from NVMe → GPU
+        data = self.load_active_experts(layer_idx, ids)
 
-        # Compute each expert's contribution
-        output = torch.zeros_like(x)
-        x_flat = x.squeeze(0).squeeze(0)  # [hidden_size]
+        # Dequantize each expert's projections and compute
+        output = torch.zeros(self.hidden_size, device=self.device, dtype=torch.float16)
+        x_flat = x.squeeze(0).squeeze(0)  # [hidden]
 
-        for i, (eid, expert) in enumerate(zip(ids, experts)):
-            # Dequantize projections on GPU
-            gate_w = self.dequant_expert_proj(expert, "gate_proj")  # [intermediate, hidden]
-            up_w = self.dequant_expert_proj(expert, "up_proj")      # [intermediate, hidden]
-            down_w = self.dequant_expert_proj(expert, "down_proj")  # [hidden, intermediate]
+        for i in range(k):
+            # Dequantize this expert's projections
+            gate_w = dequantize_4bit(data["gate_proj.weight"][i], data["gate_proj.scales"][i], data["gate_proj.biases"][i], GROUP_SIZE)
+            up_w = dequantize_4bit(data["up_proj.weight"][i], data["up_proj.scales"][i], data["up_proj.biases"][i], GROUP_SIZE)
+            down_w = dequantize_4bit(data["down_proj.weight"][i], data["down_proj.scales"][i], data["down_proj.biases"][i], GROUP_SIZE)
 
-            # SwiGLU: down(silu(gate(x)) * up(x))
+            # SwiGLU
             gate_out = F.silu(x_flat @ gate_w.t())
             up_out = x_flat @ up_w.t()
             hidden = gate_out * up_out
             expert_out = hidden @ down_w.t()
 
-            output[0, 0] += weights[i] * expert_out
-
-            # Free dequantized weights immediately
+            output += weights[i] * expert_out
             del gate_w, up_w, down_w, gate_out, up_out, hidden, expert_out
 
-        return output
+        del data
+        return output.unsqueeze(0).unsqueeze(0)
 
     def run_shared_expert(self, x, layer_idx):
         """Run the shared expert (always active, pinned in VRAM)."""
@@ -289,6 +286,7 @@ class SniperEngine:
         Run the router to pick top-K experts.
         Router weight is pinned in VRAM.
         """
+        # Router is quantized: has weight, scales, biases
         prefix_candidates = [
             f"language_model.model.layers.{layer_idx}.mlp.gate",
             f"model.layers.{layer_idx}.mlp.gate",
@@ -297,7 +295,11 @@ class SniperEngine:
         router_w = None
         for p in prefix_candidates:
             if f"{p}.weight" in self.pinned:
-                router_w = self.pinned[f"{p}.weight"]
+                w = self.pinned[f"{p}.weight"]
+                if w.dtype == torch.uint32:
+                    router_w = dequantize_4bit(w, self.pinned[f"{p}.scales"], self.pinned[f"{p}.biases"], GROUP_SIZE)
+                else:
+                    router_w = w.to(torch.float16)
                 break
 
         if router_w is None:

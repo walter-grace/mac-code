@@ -2,14 +2,14 @@
 Split Qwen3.5-122B-A10B-4bit into Flash Stream format for PyTorch.
 
 Input: mlx-community/Qwen3.5-122B-A10B-4bit safetensors (69.6 GB)
-Output: pinned.safetensors + per-layer expert files
+Output: pinned.safetensors + per-layer expert safetensors
 
-The MLX 4-bit format stores:
-  - weight: uint32 packed (4 bits per param, group_size=64)
-  - scales: float16 (1 per group)
-  - biases: float16 (1 per group)
+Key discovery: MLX stores all 256 experts STACKED in dim 0:
+  switch_mlp.gate_proj.weight: [256, 1024, 384] (uint32)
+  switch_mlp.up_proj.weight:   [256, 1024, 384] (uint32)
+  switch_mlp.down_proj.weight: [256, 3072, 128] (uint32)
 
-We keep this format on disk. The sniper dequantizes on the GPU at runtime.
+At runtime, we index expert_tensor[expert_ids] to get only active experts.
 
 Usage:
     python3 split_122b.py [--model-dir /path/to/model] [--output-dir /path/to/output]
@@ -25,9 +25,6 @@ from pathlib import Path
 from safetensors import safe_open
 from safetensors.torch import save_file
 import torch
-
-NUM_LAYERS = 48
-NUM_EXPERTS = 256
 
 
 def main():
@@ -48,69 +45,41 @@ def main():
         shutil.copy(config_src, output_dir / "config.json")
         print(f"Copied config.json")
 
-    # Index all safetensors files
-    shard_files = sorted(model_dir.glob("model-*.safetensors"))
-    print(f"Found {len(shard_files)} safetensors shards")
-
-    # Build key → shard mapping from index
+    # Load weight index
     index_path = model_dir / "model.safetensors.index.json"
-    if index_path.exists():
-        with open(index_path) as f:
-            index = json.load(f)
-        key_to_shard = index["weight_map"]
-        print(f"Loaded weight map: {len(key_to_shard)} keys")
-    else:
-        # Scan all shards
-        print("No index found, scanning shards...")
-        key_to_shard = {}
-        for sf in shard_files:
-            with safe_open(str(sf), framework="pt", device="cpu") as f:
-                for k in f.keys():
-                    key_to_shard[k] = sf.name
+    with open(index_path) as f:
+        index = json.load(f)
+    key_to_shard = index["weight_map"]
+    print(f"Total keys: {len(key_to_shard)}")
 
-    # Classify keys: pinned vs expert
+    # Classify: pinned vs expert (switch_mlp)
     pinned_keys = []
-    expert_keys = {}  # layer_idx -> expert_idx -> [keys]
-
-    # Weight names in MLX-community models (language_model. prefix stripped):
-    #   model.layers.{i}.mlp.experts.{j}.{gate_proj|up_proj|down_proj}.{weight|scales|biases}
-    # The 35B used .mlp.switch_mlp.experts. but 122B uses .mlp.experts. directly.
-    # We check for both patterns.
+    expert_keys = {}  # layer_idx -> [keys]
 
     for key in sorted(key_to_shard.keys()):
-        is_expert = False
-        for prefix in ["language_model.model.layers.", "model.layers."]:
-            # Match both .mlp.experts. and .mlp.switch_mlp.experts.
-            if prefix in key and ".mlp." in key and ".experts." in key:
-                # Skip shared_expert keys — those get pinned
-                if ".shared_expert." in key:
-                    break
-                # Parse layer and expert index
-                after_prefix = key.split(prefix)[1]
-                parts = after_prefix.split(".")
-                layer_idx = int(parts[0])
-                # Find expert index after "experts."
-                exp_start = key.index(".experts.") + len(".experts.")
-                rest = key[exp_start:]
-                expert_idx = int(rest.split(".")[0])
-
+        if ".switch_mlp." in key:
+            # Extract layer index
+            # Pattern: language_model.model.layers.{i}.mlp.switch_mlp.{proj}.{component}
+            parts = key.split(".layers.")
+            if len(parts) > 1:
+                layer_idx = int(parts[1].split(".")[0])
                 if layer_idx not in expert_keys:
-                    expert_keys[layer_idx] = {}
-                if expert_idx not in expert_keys[layer_idx]:
-                    expert_keys[layer_idx][expert_idx] = []
-                expert_keys[layer_idx][expert_idx].append(key)
-                is_expert = True
-                break
-
-        if not is_expert:
+                    expert_keys[layer_idx] = []
+                expert_keys[layer_idx].append(key)
+            else:
+                pinned_keys.append(key)
+        else:
             pinned_keys.append(key)
 
-    num_expert_layers = len(expert_keys)
-    total_experts = sum(len(v) for v in expert_keys.values())
-    print(f"\nPinned keys: {len(pinned_keys)}")
-    print(f"Expert layers: {num_expert_layers}")
-    print(f"Total expert entries: {total_experts}")
-    print(f"Experts per layer: {total_experts // max(num_expert_layers, 1)}")
+    print(f"Pinned keys: {len(pinned_keys)}")
+    print(f"Expert layers: {len(expert_keys)}")
+    expert_key_count = sum(len(v) for v in expert_keys.values())
+    print(f"Expert keys: {expert_key_count}")
+    if expert_keys:
+        first_layer = min(expert_keys.keys())
+        print(f"Keys per expert layer: {len(expert_keys[first_layer])}")
+        for k in expert_keys[first_layer]:
+            print(f"  {k}")
 
     # Save pinned weights
     print(f"\n--- Saving pinned weights ---")
@@ -121,19 +90,14 @@ def main():
     for i, key in enumerate(pinned_keys):
         shard_name = key_to_shard[key]
         shard_path = str(model_dir / shard_name)
-
         if shard_path not in shards_opened:
             shards_opened[shard_path] = safe_open(shard_path, framework="pt", device="cpu")
-
-        tensor = shards_opened[shard_path].get_tensor(key)
-        pinned[key] = tensor
-
+        pinned[key] = shards_opened[shard_path].get_tensor(key)
         if (i + 1) % 100 == 0:
-            print(f"  {i+1}/{len(pinned_keys)} pinned keys loaded...")
+            print(f"  {i+1}/{len(pinned_keys)} loaded...")
 
     pinned_size = sum(t.nbytes for t in pinned.values()) / 1e9
     print(f"  Pinned: {len(pinned)} tensors, {pinned_size:.2f} GB")
-
     save_file(pinned, str(output_dir / "pinned.safetensors"))
     print(f"  Saved in {time.time()-t0:.1f}s")
     del pinned
@@ -143,42 +107,33 @@ def main():
     print(f"\n--- Saving expert weights per layer ---")
     for layer_idx in sorted(expert_keys.keys()):
         t0 = time.time()
-        layer_experts = expert_keys[layer_idx]
-
         layer_tensors = {}
-        for expert_idx in sorted(layer_experts.keys()):
-            for key in layer_experts[expert_idx]:
-                shard_name = key_to_shard[key]
-                shard_path = str(model_dir / shard_name)
 
-                if shard_path not in shards_opened:
-                    shards_opened[shard_path] = safe_open(shard_path, framework="pt", device="cpu")
-
-                tensor = shards_opened[shard_path].get_tensor(key)
-                # Simplify key: just expert_idx.proj.component
-                # e.g., "0.gate_proj.weight", "0.gate_proj.scales"
-                short_key = key.split(".experts.")[1]
-                layer_tensors[short_key] = tensor
+        for key in expert_keys[layer_idx]:
+            shard_name = key_to_shard[key]
+            shard_path = str(model_dir / shard_name)
+            if shard_path not in shards_opened:
+                shards_opened[shard_path] = safe_open(shard_path, framework="pt", device="cpu")
+            tensor = shards_opened[shard_path].get_tensor(key)
+            # Simplify key: strip everything before switch_mlp
+            short_key = key.split(".switch_mlp.")[1]
+            layer_tensors[short_key] = tensor
 
         layer_size = sum(t.nbytes for t in layer_tensors.values()) / 1e9
-
         out_path = output_dir / "experts" / f"layer_{layer_idx:02d}.safetensors"
         save_file(layer_tensors, str(out_path))
-
         elapsed = time.time() - t0
-        print(f"  Layer {layer_idx:2d}: {len(layer_experts)} experts, "
-              f"{len(layer_tensors)} tensors, {layer_size:.2f} GB [{elapsed:.1f}s]")
+        print(f"  Layer {layer_idx:2d}: {len(layer_tensors)} tensors, {layer_size:.2f} GB [{elapsed:.1f}s]")
 
         del layer_tensors
         gc.collect()
 
-    # Close all shard handles
     shards_opened.clear()
 
     print(f"\n=== Split complete ===")
     print(f"  Output: {output_dir}")
     print(f"  Pinned: {output_dir / 'pinned.safetensors'}")
-    print(f"  Experts: {output_dir / 'experts' / 'layer_*.safetensors'}")
+    print(f"  Expert layers: {len(expert_keys)}")
 
 
 if __name__ == "__main__":
