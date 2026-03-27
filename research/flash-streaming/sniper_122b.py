@@ -305,7 +305,8 @@ class SniperEngine:
         if router_w is None:
             raise ValueError(f"Router weight not found for layer {layer_idx}")
 
-        x_flat = x.squeeze(0).squeeze(0)  # [hidden]
+        x_flat = x.squeeze(0).squeeze(0).to(torch.float16)  # [hidden]
+        router_w = router_w.to(torch.float16)
         logits = x_flat @ router_w.t()     # [num_experts]
         scores = F.softmax(logits, dim=-1)
         top_k_scores, top_k_ids = torch.topk(scores, self.top_k)
@@ -356,7 +357,7 @@ class SniperEngine:
         if q_w is None:
             return h  # Skip if weights not found
 
-        x = normed.squeeze(0).squeeze(0)  # [hidden]
+        x = normed.squeeze(0).squeeze(0).to(torch.float16)  # [hidden]
         q = x @ q_w.t()
         k = x @ k_w.t()
         v = x @ v_w.t()
@@ -497,7 +498,7 @@ class SniperEngine:
         """RMSNorm."""
         variance = x.to(torch.float32).pow(2).mean(-1, keepdim=True)
         x_normed = x * torch.rsqrt(variance + eps)
-        return (x_normed * weight).to(x.dtype)
+        return (x_normed * weight).to(torch.float16)
 
     def _dequant_pinned(self, key_prefix):
         """Dequantize a pinned weight by prefix."""
