@@ -219,11 +219,17 @@ def main():
             )
 
     for name, buf in list(model.named_buffers()):
-        if buf.device == torch.device("meta"):
-            set_module_tensor_to_device(
-                model, name, device=device,
-                value=torch.zeros(buf.shape, dtype=buf.dtype)
-            )
+        if buf.device == torch.device("meta") or buf.device != torch.device(device):
+            try:
+                set_module_tensor_to_device(
+                    model, name, device=device,
+                    value=torch.zeros(buf.shape, dtype=buf.dtype)
+                )
+            except Exception:
+                pass  # some buffers may not be settable
+
+    # Move ALL remaining buffers (rotary_emb inv_freq etc) to GPU
+    model = model.to(device)
 
     vram = torch.cuda.memory_allocated() / 1e9
     print(f"  Empty model on GPU: {vram:.2f} GB [{time.time()-t0:.1f}s]")
