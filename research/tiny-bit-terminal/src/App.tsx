@@ -98,10 +98,10 @@ export const App: React.FC<AppProps> = ({ serverUrl }) => {
   }
 
   return (
-    <Box flexDirection="column" height={process.stdout.rows || 24}>
+    <Box flexDirection="column" width={Math.min(process.stdout.columns || 80, 80)}>
       {/* Header */}
-      <Box flexDirection="column" paddingX={1}>
-        <Text color="#33FF33">{HEADER}</Text>
+      <Box flexDirection="column">
+        <Text color="#33FF33" wrap="truncate">{HEADER}</Text>
       </Box>
 
       {/* Chat area */}

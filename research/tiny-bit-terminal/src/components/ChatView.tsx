@@ -10,10 +10,16 @@ interface ChatEntry {
   content: string;
 }
 
-// Compare servers — Bonsai on 8203, Qwen3.5-9B on 8204
-const COMPARE_SERVERS = [
-  { name: "Bonsai-8B (1-bit)", url: "http://localhost:8203" },
-  { name: "Qwen3.5-9B (IQ2)", url: "http://localhost:8204" },
+// Compare servers — check both ports for running models
+// Model registry for compare mode
+const MODEL_REGISTRY = [
+  { id: "bonsai", name: "Bonsai-8B (1-bit)", port: 8203 },
+  { id: "qwen06", name: "Qwen3-0.6B", port: 8210 },
+  { id: "qwen17", name: "Qwen3-1.7B", port: 8211 },
+  { id: "ministral", name: "Ministral-3B", port: 8212 },
+  { id: "qwen4", name: "Qwen3-4B", port: 8213 },
+  { id: "qwen9", name: "Qwen3.5-9B", port: 8204 },
+  { id: "qwen8", name: "Qwen3-8B", port: 8214 },
 ];
 
 interface ChatViewProps {
@@ -34,8 +40,10 @@ const HELP_TEXT = `
 ║ /screenshot      Capture & describe      ║
 ║ /shell <cmd>     Run a shell command     ║
 ║ /stats           Show server stats       ║
+║ /document <path> Parse PDF/doc/image       ║
 ║ /compare <prompt> Compare Bonsai vs 9B    ║
 ║ /clear           Clear chat history      ║
+║ /models          List/download models     ║
 ║ /help            Show this help          ║
 ║ /quit            Exit tiny bit           ║
 ╚══════════════════════════════════════════╝`;
@@ -153,89 +161,132 @@ Rules:
 
           case "/compare": {
             if (!args) {
-              setEntries((prev) => [
-                ...prev,
-                { role: "error", content: "◆ Usage: /compare <prompt>" },
-              ]);
+              // Show available models and usage
+              let online: string[] = [];
+              let listing = "◆ /compare — Race two models!\n\n  Usage: /compare <model1> <model2> <prompt>\n\n  Available models:\n";
+              for (const m of MODEL_REGISTRY) {
+                let status = "○";
+                try {
+                  execSync(`curl -s --max-time 1 http://localhost:${m.port}/health 2>/dev/null | grep -q ok`, { timeout: 2000 });
+                  status = "●";
+                  online.push(m.id);
+                } catch {}
+                listing += `    ${status} ${m.id.padEnd(12)} ${m.name} (port ${m.port})\n`;
+              }
+              listing += `\n  Example: /compare bonsai qwen9 What is AI?\n`;
+              if (online.length >= 2) {
+                listing += `  Quick:   /compare ${online[0]} ${online[1]} What is AI?`;
+              }
+              setEntries((prev) => [...prev, { role: "info", content: listing }]);
               return;
             }
+
+            // Parse: /compare <model1> <model2> <prompt>
+            const parts = args.split(" ");
+            let model1Id = "", model2Id = "", prompt = "";
+
+            // Check if first two words match model IDs
+            const m1 = MODEL_REGISTRY.find(m => m.id === parts[0]);
+            const m2 = parts.length > 1 ? MODEL_REGISTRY.find(m => m.id === parts[1]) : null;
+
+            if (m1 && m2) {
+              model1Id = parts[0];
+              model2Id = parts[1];
+              prompt = parts.slice(2).join(" ");
+            } else {
+              // No model IDs — find any two online models
+              const onlineModels: typeof MODEL_REGISTRY = [];
+              for (const m of MODEL_REGISTRY) {
+                try {
+                  execSync(`curl -s --max-time 1 http://localhost:${m.port}/health 2>/dev/null | grep -q ok`, { timeout: 2000 });
+                  onlineModels.push(m);
+                } catch {}
+              }
+              if (onlineModels.length < 2) {
+                setEntries((prev) => [...prev, { role: "error", content: "◆ Need 2+ models running. Use /models to see how to start them." }]);
+                return;
+              }
+              model1Id = onlineModels[0].id;
+              model2Id = onlineModels[1].id;
+              prompt = args;
+            }
+
+            if (!prompt) {
+              setEntries((prev) => [...prev, { role: "error", content: "◆ Need a prompt. Example: /compare bonsai qwen9 What is AI?" }]);
+              return;
+            }
+
+            const server1 = MODEL_REGISTRY.find(m => m.id === model1Id)!;
+            const server2 = MODEL_REGISTRY.find(m => m.id === model2Id)!;
+            const servers = [
+              { name: server1.name, url: `http://localhost:${server1.port}` },
+              { name: server2.name, url: `http://localhost:${server2.port}` },
+            ];
+
             setEntries((prev) => [
               ...prev,
-              { role: "user", content: `/compare ${args}` },
-              { role: "info", content: "◆ Racing both models simultaneously..." },
+              { role: "user", content: `/compare ${model1Id} vs ${model2Id}: ${prompt}` },
+              { role: "info", content: `◆ Racing: ${server1.name} vs ${server2.name}` },
             ]);
 
             const compareMessages: Message[] = [
               { role: "system", content: "Answer concisely in 2-3 sentences." },
-              { role: "user", content: args },
+              { role: "user", content: prompt },
             ];
 
-            // Track both streams simultaneously
             const results: { [key: string]: string } = {};
-            const stats: { [key: string]: { tokPerSec: number; tokens: number } } = {};
-            let activeStreams = 0;
+            const cmpStats: { [key: string]: { tokPerSec: number; tokens: number } } = {};
 
             setIsStreaming(true);
             onStatusChange("streaming");
 
             const updateStreamDisplay = () => {
               const lines: string[] = [];
-              for (const server of COMPARE_SERVERS) {
-                const text = results[server.name] || "";
-                const s = stats[server.name];
-                lines.push(`┌─ ${server.name} ${s ? `(${s.tokPerSec} tok/s)` : "(streaming...)"}`);
+              for (const s of servers) {
+                const text = results[s.name] || "";
+                const st = cmpStats[s.name];
+                lines.push(`┌─ ${s.name} ${st ? `✓ ${st.tokPerSec} tok/s` : "streaming..."}`);
                 lines.push(`│ ${text || "..."}`);
-                lines.push(`└${"─".repeat(40)}`);
+                lines.push(`└${"─".repeat(50)}`);
               }
               setStreamingText(lines.join("\n"));
             };
 
-            // Fire both requests at the same time
-            const promises = COMPARE_SERVERS.map(async (server) => {
+            const promises = servers.map(async (server) => {
               try {
-                const compareClient = new LlamaClient(server.url);
+                const cmpClient = new LlamaClient(server.url);
                 results[server.name] = "";
-                activeStreams++;
-
                 await new Promise<void>((resolve) => {
-                  compareClient.streamChat(
-                    compareMessages,
-                    {
-                      onToken: (token) => {
-                        results[server.name] += token;
-                        updateStreamDisplay();
-                      },
-                      onDone: (s) => {
-                        stats[server.name] = { tokPerSec: s.tokensPerSec, tokens: s.totalTokens };
-                        activeStreams--;
-                        updateStreamDisplay();
-                        resolve();
-                      },
-                      onError: (err) => {
-                        results[server.name] = `ERROR: ${err}`;
-                        activeStreams--;
-                        updateStreamDisplay();
-                        resolve();
-                      },
-                    }
-                  );
+                  cmpClient.streamChat(compareMessages, {
+                    onToken: (token) => { results[server.name] += token; updateStreamDisplay(); },
+                    onDone: (s) => { cmpStats[server.name] = { tokPerSec: s.tokensPerSec, tokens: s.totalTokens }; updateStreamDisplay(); resolve(); },
+                    onError: (err) => { results[server.name] = `ERROR: ${err}`; updateStreamDisplay(); resolve(); },
+                  });
                 });
               } catch (e: any) {
                 results[server.name] = `ERROR: ${e.message?.split("\n")[0]}`;
               }
             });
 
-            // Wait for BOTH to finish
             await Promise.all(promises);
 
-            // Add final results to chat history
-            for (const server of COMPARE_SERVERS) {
-              const s = stats[server.name];
+            // Show final results with winner
+            const s1 = cmpStats[servers[0].name];
+            const s2 = cmpStats[servers[1].name];
+            const winner = s1 && s2 ? (s1.tokPerSec > s2.tokPerSec ? servers[0].name : servers[1].name) : "";
+
+            for (const server of servers) {
+              const s = cmpStats[server.name];
+              const isWinner = server.name === winner;
               setEntries((prev) => [
                 ...prev,
-                { role: "info", content: `◆ ─── ${server.name} ${s ? `· ${s.tokPerSec} tok/s · ${s.tokens} tokens` : ""} ───` },
+                { role: "info", content: `◆ ─── ${server.name} ${s ? `· ${s.tokPerSec} tok/s · ${s.tokens} tokens` : ""} ${isWinner ? "🏆" : ""} ───` },
                 { role: "assistant", content: results[server.name] || "No response" },
               ]);
+            }
+
+            if (winner) {
+              setEntries((prev) => [...prev, { role: "info", content: `◆ Winner: ${winner} (faster)` }]);
             }
 
             setIsStreaming(false);
@@ -372,7 +423,7 @@ Rules:
               const safeQuery = args.replace(/[`$\\'"]/g, "");
               const isNews = /news|today|latest|recent|happened|breaking|update/i.test(args);
               const searchResults = execSync(
-                `python3 -c "
+                `/opt/homebrew/bin/python3.13 -c "
 import sys
 from ddgs import DDGS
 from datetime import datetime
@@ -461,6 +512,78 @@ print(chr(10).join(results))
               content: `Please describe what you think might be in an image at path: ${args}. Note: I cannot actually see images, but I can help discuss image-related topics.`,
             });
             break; // fall through to streaming
+          }
+
+          case "/document":
+          case "/doc":
+          case "/parse": {
+            if (!args) {
+              setEntries((prev) => [
+                ...prev,
+                { role: "error", content: "◆ Usage: /document <file path>\n  Supports: PDF, DOCX, XLSX, PPTX, PNG, JPG, TIFF" },
+              ]);
+              return;
+            }
+            const docPath = args.trim().replace(/^~/, process.env.HOME || "").replace(/['"]/g, "");
+            setEntries((prev) => [...prev, { role: "user", content: `/document ${args}` }]);
+            setSpinnerMsg(`LiteParse: ${docPath}`);
+
+            let parsed = "";
+            try {
+              const docExt = docPath.split(".").pop() || "pdf";
+              execSync(`cp "${docPath}" "/tmp/tinybit_doc.${docExt}"`, { timeout: 5000 });
+              parsed = execSync(`npx lit parse "/tmp/tinybit_doc.${docExt}" --dpi 72 --num-workers 1 -q 2>/dev/null | head -300`, {
+                encoding: "utf-8",
+                timeout: 30000,
+              }).trim();
+            } catch (err: any) {
+              setSpinnerMsg("");
+              setEntries((prev) => [...prev, { role: "error", content: `◆ Parse failed: ${err.message?.split("\n")[0]}` }]);
+              return;
+            }
+
+            setSpinnerMsg("");
+            if (!parsed || parsed.length < 10) {
+              setEntries((prev) => [...prev, { role: "info", content: "◆ No content extracted from document." }]);
+              return;
+            }
+
+            setEntries((prev) => [...prev, {
+              role: "info",
+              content: `◆ Parsed ${parsed.split("\n").length} lines from ${args.split("/").pop()}`,
+            }]);
+
+            // Feed parsed content to the model
+            messagesRef.current.push({
+              role: "user",
+              content: `I parsed this document (${args.split("/").pop()}) with LiteParse. Here is the extracted text:\n\n${parsed}\n\nSummarize the key contents of this document.`,
+            });
+            break; // fall through to agent loop
+          }
+
+          case "/models": {
+            const modelList = [
+              { name: "Qwen3-0.6B", size: "0.4 GB", speed: "50+ tok/s", repo: "unsloth/Qwen3-0.6B-GGUF", file: "Qwen3-0.6B-Q4_K_M.gguf", port: 8203 },
+              { name: "Bonsai-8B (1-bit)", size: "1.16 GB", speed: "9-20 tok/s", repo: "prism-ml/Bonsai-8B-gguf", file: "Bonsai-8B.gguf", port: 8203, note: "needs PrismML llama.cpp" },
+              { name: "Qwen3-1.7B", size: "1.1 GB", speed: "30+ tok/s", repo: "unsloth/Qwen3-1.7B-GGUF", file: "Qwen3-1.7B-Q4_K_M.gguf", port: 8203 },
+              { name: "Ministral-3B", size: "2.15 GB", speed: "15-25 tok/s", repo: "lmstudio-community/Ministral-3-3B-Instruct-2512-GGUF", file: "Ministral-3-3B-Instruct-2512-Q4_K_M.gguf", port: 8203 },
+              { name: "Qwen3-4B", size: "2.5 GB", speed: "15-25 tok/s", repo: "unsloth/Qwen3-4B-GGUF", file: "Qwen3-4B-Q4_K_M.gguf", port: 8203 },
+              { name: "Qwen3.5-9B (IQ2_XXS)", size: "3.19 GB", speed: "1-5 tok/s", repo: "unsloth/Qwen3.5-9B-GGUF", file: "Qwen3.5-9B-UD-IQ2_XXS.gguf", port: 8204 },
+              { name: "Qwen3-8B", size: "5.0 GB", speed: "5-15 tok/s", repo: "unsloth/Qwen3-8B-GGUF", file: "Qwen3-8B-Q4_K_M.gguf", port: 8204 },
+            ];
+            let info = "◆ Available Models:\n\n";
+            for (const m of modelList) {
+              // Check if server is running on that port
+              let status = "○ offline";
+              try {
+                execSync(`curl -s --max-time 1 http://localhost:${m.port}/health 2>/dev/null | grep -q ok`, { timeout: 2000 });
+                status = "● online";
+              } catch {}
+              info += `  ${status} ${m.name}\n    Size: ${m.size} | Speed: ${m.speed}\n    Download: huggingface-cli download ${m.repo} ${m.file} --local-dir ./models\n\n`;
+            }
+            info += "  Switch model: restart with --server http://localhost:<port>";
+            setEntries((prev) => [...prev, { role: "info", content: info }]);
+            return;
           }
 
           case "/screenshot": {
@@ -579,7 +702,7 @@ print(chr(10).join(results))
               const safeQuery = query.replace(/[`$\\'"]/g, "");
               const isNews = /news|today|latest|happened/i.test(query);
               results = execSync(
-                `python3 -c "
+                `/opt/homebrew/bin/python3.13 -c "
 import sys
 from ddgs import DDGS
 from datetime import datetime
@@ -609,62 +732,44 @@ print(chr(10).join(res))
             });
 
           } else if (toolName === "read_file") {
-            const filePath = toolArgs.path.replace(/^~/, process.env.HOME || "");
-            const isImage = /\.(png|jpg|jpeg|gif|webp|bmp|svg|heic)$/i.test(filePath);
-            const isPDF = /\.pdf$/i.test(filePath);
-            const isDoc = /\.(doc|docx|rtf|html|htm)$/i.test(filePath);
+            let filePath = toolArgs.path.replace(/^~/, process.env.HOME || "");
+            // Auto-resolve relative paths — check common locations
+            if (!filePath.startsWith("/")) {
+              const home = process.env.HOME || "";
+              const candidates = [
+                `${home}/Desktop/${filePath}`,
+                `${home}/Downloads/${filePath}`,
+                `${home}/Documents/${filePath}`,
+                `${home}/${filePath}`,
+                filePath,
+              ];
+              for (const c of candidates) {
+                try { execSync(`test -f "${c}"`, { timeout: 1000 }); filePath = c; break; } catch {}
+              }
+            }
+            const isDocument = /\.(pdf|docx|xlsx|pptx|doc|png|jpg|jpeg|tiff|bmp|heic)$/i.test(filePath);
 
-            setSpinnerMsg(isImage ? `Analyzing image: ${filePath}` : isPDF ? `Parsing PDF: ${filePath}` : `Reading: ${filePath}`);
-            setEntries((prev) => [...prev, { role: "info", content: `◆ ${isImage ? "Analyzing" : "Reading"}: ${filePath}` }]);
+            setSpinnerMsg(isDocument ? `LiteParse: ${filePath}` : `Reading: ${filePath}`);
+            setEntries((prev) => [...prev, { role: "info", content: `◆ ${isDocument ? "Parsing" : "Reading"}: ${filePath}` }]);
 
             let content = "";
             try {
-              if (isImage) {
-                // Use vision API — encode image as base64 and send to the model
-                const b64 = execSync(`base64 -i "${filePath}"`, { encoding: "utf-8", timeout: 10000 }).trim().replace(/\n/g, "");
-                const ext = filePath.split(".").pop()?.toLowerCase() || "png";
-                const mime = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", heic: "image/heic" }[ext] || "image/png";
-
-                // Send directly as a vision message — break out of tool loop for this
-                setSpinnerMsg("Model analyzing image...");
-                const visionResp = await client.chat([
-                  { role: "user", content: [
-                    { type: "image_url", image_url: { url: `data:${mime};base64,${b64}` } },
-                    { type: "text", text: "Describe what you see in this image in detail." },
-                  ] as any },
-                ], 300);
-
-                setSpinnerMsg("");
-                messagesRef.current.push({ role: "assistant", content: visionResp });
-                setEntries((prev) => [...prev, { role: "assistant", content: visionResp }]);
-                break; // Exit tool loop — vision response is final
-
-              } else if (isPDF) {
-                // macOS textutil can't do PDF, try python
-                try {
-                  content = execSync(`python3 -c "
-import subprocess
-result = subprocess.run(['mdimport', '-d2', '${filePath}'], capture_output=True, text=True, timeout=10)
-print(result.stderr[:3000])
-"`, { encoding: "utf-8", timeout: 15000 }).trim();
-                  if (!content || content.length < 50) {
-                    // Fallback: try strings
-                    content = execSync(`strings "${filePath}" | head -100`, { encoding: "utf-8", timeout: 5000 }).trim();
-                  }
-                } catch {
-                  content = "Could not parse PDF. Try: pip install pymupdf";
+              if (isDocument) {
+                // Use LiteParse — copy to temp to handle spaces in paths
+                const ext = filePath.split(".").pop() || "pdf";
+                execSync(`cp "${filePath}" "/tmp/tinybit_parse.${ext}"`, { timeout: 5000 });
+                content = execSync(`npx lit parse "/tmp/tinybit_parse.${ext}" --dpi 72 --num-workers 1 -q 2>/dev/null | head -200`, {
+                  encoding: "utf-8",
+                  timeout: 30000,
+                }).trim();
+                if (!content || content.length < 10) {
+                  content = "LiteParse returned no content. File may be empty or unsupported.";
                 }
-
-              } else if (isDoc) {
-                // macOS textutil converts doc/docx/rtf/html to text
-                content = execSync(`textutil -convert txt -stdout "${filePath}" | head -100`, { encoding: "utf-8", timeout: 10000 }).trim();
-
               } else {
-                // Regular text file
                 content = execSync(`head -80 "${filePath}"`, { encoding: "utf-8", timeout: 5000 }).trim();
               }
             } catch (err: any) {
-              content = `Error reading file: ${err.message?.split("\n")[0]}`;
+              content = `Error: ${err.message?.split("\n")[0]}`;
             }
             setSpinnerMsg("");
 
@@ -728,19 +833,20 @@ print(result.stderr[:3000])
   return (
     <Box flexDirection="column" flexGrow={1}>
       {/* Chat history */}
-      <Box flexDirection="column" flexGrow={1} paddingX={1}>
+      <Box flexDirection="column" flexGrow={1} paddingX={1} width={Math.min((process.stdout.columns || 80) - 2, 78)}>
         {visibleEntries.map((entry, i) => (
-          <Box key={i} flexDirection="column" marginBottom={0}>
+          <Box key={i} flexDirection="column" marginBottom={1}>
             {entry.role !== "system" && entry.role !== "info" && entry.role !== "error" && (
-              <Text color={getEntryColor(entry.role)} bold dimColor={entry.role === "assistant"}>
+              <Text color={getEntryColor(entry.role)} bold>
                 {getEntryPrefix(entry.role)}:
               </Text>
             )}
             <Text
               color={getEntryColor(entry.role)}
               wrap="wrap"
+              dimColor={entry.role === "info"}
             >
-              {entry.role === "user" ? "  " : ""}{entry.content}
+              {entry.role === "user" ? "   " : " "}{entry.content}
             </Text>
           </Box>
         ))}
@@ -752,28 +858,22 @@ print(result.stderr[:3000])
           </Box>
         )}
         {isStreaming && (
-          <Box flexDirection="column">
-            <Text color="#33FF33" bold dimColor>
-               tiny bit:
+          <Box flexDirection="column" marginBottom={1}>
+            <Text color="#33FF33" bold>
+              tiny bit:
             </Text>
             <Text color="#33FF33" wrap="wrap">
-              {streamingText}
+              {" "}{streamingText}
               <Text color="#33FF33">█</Text>
             </Text>
-            <Box marginTop={0}>
-              <RetroSpinner
-                label="generating..."
-                type="dots"
-              />
-            </Box>
           </Box>
         )}
       </Box>
 
       {/* Input area */}
-      <Box paddingX={1}>
-        <Text color="#33FF33" dimColor>
-          ╠══════════════════════════════════════════════════════════════════════════════╣
+      <Box paddingX={1} marginTop={1}>
+        <Text color="#1A8C1A">
+          {"─".repeat(78)}
         </Text>
       </Box>
       <Box paddingX={1}>
@@ -789,7 +889,7 @@ print(result.stderr[:3000])
             value={input}
             onChange={(val) => {
               setInput(val);
-              setShowCommands(val === "/");
+              setShowCommands(val.startsWith("/") && !val.includes(" "));
             }}
             onSubmit={(val) => {
               setShowCommands(false);
@@ -799,21 +899,30 @@ print(result.stderr[:3000])
           />
         )}
       </Box>
-      {showCommands && (
-        <Box flexDirection="column" paddingLeft={4}>
-          <Text color="#1A8C1A">{"─".repeat(40)}</Text>
-          <Text color="#33FF33"> /search {"<query>"}   <Text color="#1A8C1A">web search + AI synthesis</Text></Text>
-          <Text color="#33FF33"> /image {"<path>"}     <Text color="#1A8C1A">describe an image</Text></Text>
-          <Text color="#33FF33"> /screenshot       <Text color="#1A8C1A">capture + analyze screen</Text></Text>
-          <Text color="#33FF33"> /shell {"<cmd>"}      <Text color="#1A8C1A">run a shell command</Text></Text>
-          <Text color="#33FF33"> /compare {"<prompt>"}  <Text color="#1A8C1A">compare Bonsai vs 9B</Text></Text>
-          <Text color="#33FF33"> /stats            <Text color="#1A8C1A">show performance stats</Text></Text>
-          <Text color="#33FF33"> /clear            <Text color="#1A8C1A">clear conversation</Text></Text>
-          <Text color="#33FF33"> /help             <Text color="#1A8C1A">show all commands</Text></Text>
-          <Text color="#33FF33"> /quit             <Text color="#1A8C1A">exit</Text></Text>
-          <Text color="#1A8C1A">{"─".repeat(40)}</Text>
-        </Box>
-      )}
+      {showCommands && (() => {
+        const cmds = [
+          ["/search", "<query>", "web search + AI synthesis"],
+          ["/shell", "<cmd>", "run a shell command"],
+          ["/document", "<path>", "parse PDF/doc/image (LiteParse)"],
+          ["/image", "<path>", "describe an image"],
+          ["/screenshot", "", "capture + analyze screen"],
+          ["/compare", "<prompt>", "compare Bonsai vs 9B"],
+          ["/stats", "", "show performance stats"],
+          ["/clear", "", "clear conversation"],
+          ["/models", "", "list/download models"],
+          ["/help", "", "show all commands"],
+          ["/quit", "", "exit"],
+        ].filter(([cmd]) => cmd.startsWith(input));
+        return cmds.length > 0 ? (
+          <Box flexDirection="column" paddingLeft={4}>
+            <Text color="#1A8C1A">{"─".repeat(40)}</Text>
+            {cmds.map(([cmd, arg, desc], i) => (
+              <Text key={i} color="#33FF33"> {cmd} {arg ? arg + " " : ""}<Text color="#1A8C1A">{desc}</Text></Text>
+            ))}
+            <Text color="#1A8C1A">{"─".repeat(40)}</Text>
+          </Box>
+        ) : null;
+      })()}
     </Box>
   );
 };

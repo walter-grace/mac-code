@@ -123,12 +123,18 @@ No slash commands needed — the model decides when to search the web, run comma
 
 ## Models
 
-| Model | Size | Speed (M2 8GB) | Best For |
-|-------|------|----------------|----------|
-| **Bonsai-8B** | 1.16 GB | 9-20 tok/s | Fast chat, tool calling |
-| **Qwen3.5-9B** | 3.19 GB | 1-5 tok/s | Reasoning, long context (64K) |
+| Model | Size | Speed (est.) | Best For |
+|-------|------|-------------|----------|
+| **Qwen3-0.6B** | 0.4 GB | 50+ tok/s | Ultra-fast, testing |
+| **Bonsai-8B (1-bit)** | 1.16 GB | 9-20 tok/s | Fast chat, tool calling |
+| **Qwen3-1.7B** | 1.1 GB | 30+ tok/s | Lightweight assistant |
+| **Ministral-3B** | 2.15 GB | 15-25 tok/s | Balanced quality/speed |
+| **Qwen3-4B** | 2.5 GB | 15-25 tok/s | Good quality, small |
+| **Qwen3.5-9B (IQ2)** | 3.19 GB | 1-5 tok/s | Smart, 64K context |
+| **Qwen3-8B** | 5.0 GB | 5-15 tok/s | Best quality under 8B |
 
-Both models support tool calling. Bonsai is faster, Qwen is smarter.
+Use `/models` in the terminal to see download commands and check which are running.
+Use `/compare` to race any two models side-by-side.
 
 ## Requirements
 
