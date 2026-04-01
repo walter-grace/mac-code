@@ -16,7 +16,7 @@ The rest streams from disk on demand
 
 ```
 expert-sniper/
-├── mlx-sniper/          ← Apple Silicon (MLX) — 4.33 tok/s on 16 GB Mac Mini
+├── mlx-sniper/          ← Apple Silicon (MLX) — 1.3 tok/s on 16 GB Mac Mini
 │   ├── Install: pip install -e .
 │   ├── CLI: mlx-sniper chat ~/models/qwen3-30b
 │   └── Server: mlx-sniper server ~/models/qwen3-30b --port 8899
@@ -66,9 +66,10 @@ Full CLI and Python API: [huggingface.co/waltgrace/mlx-expert-sniper](https://hu
 |--------|-------|
 | Model | Qwen3-30B-A3B (17.2 GB, 4-bit) |
 | Standard mlx_lm | OOM |
-| **Sniper speed** | **4.22–4.68 tok/s** |
-| Cache hit rate | 85–88.5% |
-| RAM used | 0.87 GB pinned |
+| **Sniper speed (varied prompts)** | **1.3 tok/s** |
+| **Sniper speed (same prompt, warm cache)** | **2.5 tok/s** |
+| Cache hit rate | 73–99% (varies by prompt novelty) |
+| RAM used | 0.87 GB pinned + up to 13 GB expert cache |
 
 ## llama.cpp Path (Cross-Platform GPU)
 
