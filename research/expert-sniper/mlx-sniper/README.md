@@ -30,11 +30,12 @@ mlx-sniper profile ~/models/qwen3-30b --tokens 100
 |--------|-------|
 | Model | Qwen3-30B-A3B (17.2 GB, 4-bit) |
 | Standard mlx_lm | OOM |
-| **Qwen3-30B-A3B (17.2 GB)** | **3.34 tok/s** (128 experts, cache=3000) |
-| **Qwen3.5-35B-A3B (19.5 GB)** | **2.42 tok/s** (256 experts, cache=4000) |
-| Cache hit rate | 64–86% (right-sized LRU + co-activation prefetch) |
-| RAM used | 0.87–1.5 GB pinned + 8–10 GB expert cache |
-| TTFT | 6s (stable across prompts) |
+| **Qwen3.5-35B-A3B (19.5 GB)** | **5.18 tok/s** (256 experts, cache=4000, REAP+bias=1.0) |
+| **Qwen3-30B-A3B (17.2 GB)** | **3.34 tok/s** (128 experts, cache=3000, co-activation) |
+| Cache hit rate | 94% (35B) / 79% (30B) |
+| TTFT | 2.6s (35B) / 6s (30B) |
+| RAM | 8.8 GB (35B) / 9.1 GB (30B) |
+| Hardware | M4 Mac Mini 16 GB, 5 varied prompts |
 
 ## Full Package
 

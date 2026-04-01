@@ -10,7 +10,7 @@
 | Any Mac | 16 GB | Qwen3.5-9B (Q4_K_M, 5.3 GB), 64K context | 16-20 tok/s |
 | **Mac mini M4** | **16 GB** | **Qwen3.5-35B-A3B (IQ2_M, 10.6 GB)** | **30 tok/s** |
 | **Mac mini M4** | **16 GB** | **Qwen3-30B-A3B Q4 (17.2 GB) via Expert Sniper** | **3.3 tok/s** |
-| **Mac mini M4** | **16 GB** | **Qwen3.5-35B-A3B Q4 (19.5 GB) via Expert Sniper** | **2.4 tok/s** |
+| **Mac mini M4** | **16 GB** | **Qwen3.5-35B-A3B Q4 (19.5 GB) via Expert Sniper** | **5.2 tok/s** |
 | Mac mini M4 | 16 GB | Qwen3.5-35B-A3B Q4_K_M (22 GB) via Flash Streaming | 1.54 tok/s |
 | Mac mini M4 | 16 GB | Qwen3.5-27B (16.1 GB) via Flash Streaming | 0.18 tok/s |
 | Mac mini M4 Pro | 48 GB | 35B at full Q4 in RAM | 30+ tok/s |
@@ -83,9 +83,9 @@ Every number below was measured on a 16 GB Mac mini M4. Nothing estimated.
 | Qwen3-32B (dense) | 18.4 GB | 4.5 GB | 0.15 tok/s | Full 4-bit |
 | **Qwen3.5-27B (dense hybrid)** | **16.1 GB** | **5.5 GB** | **0.18 tok/s** | **Full 4-bit** |
 | Qwen3-30B-A3B (MoE) | 17.2 GB | 9.1 GB | 3.3 tok/s | Full 4-bit |
-| Qwen3.5-35B-A3B (MoE) | 19.5 GB | 10.7 GB | 2.4 tok/s | Full 4-bit |
+| Qwen3.5-35B-A3B (MoE) | 19.5 GB | 8.8 GB | 5.2 tok/s | Full 4-bit |
 
-MoE models are ~13x faster than dense because only 8 of 128-256 experts activate per token — we load only those from SSD instead of the full layer. Right-sized LRU cache + co-activation predictive prefetch. Speed measured across 5 varied prompts (not cherry-picked same-prompt results). Key finding: using LESS cache made inference faster — memory pressure was the real bottleneck.
+All numbers measured on M4 Mac Mini 16 GB across 5 varied prompts (not cherry-picked same-prompt results). MoE models are ~28x faster than dense — only 8 of 128-256 experts activate per token. 35B: REAP dead-expert masking + cache-aware routing bias + co-activation prefetch (6.6x speedup from software alone). 30B: right-sized LRU + co-activation prefetch (REAP/bias not yet applied).
 
 ### How Flash Streaming Works
 
