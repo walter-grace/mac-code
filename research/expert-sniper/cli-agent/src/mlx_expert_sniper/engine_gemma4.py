@@ -259,6 +259,7 @@ class MoESniperEngineGemma4:
 
                 h_moe = layer.post_feedforward_layernorm_2(expert_out)
                 h = h_dense + h_moe
+                h = layer.post_feedforward_layernorm(h)  # norm combined dense+moe
             else:
                 h = layer.post_feedforward_layernorm(dense_out)
 
