@@ -87,6 +87,22 @@ Every number below was measured on a 16 GB Mac mini M4. Nothing estimated.
 
 All numbers measured on M4 Mac Mini 16 GB across 5 varied prompts from cold start. Quality verified (Canberra, 8.3066, correct Python, etc). Both models: cache-aware routing bias (1.0) + co-activation prefetch + right-sized LRU cache. bias=1.0 is the universal safe maximum — quality degrades at 1.5 on both models.
 
+### Disk Requirements
+
+| Model | Processed size | Free disk needed |
+|-------|---------------|-----------------|
+| 30B / Coder-30B | 17 GB | ~20 GB |
+| 35B | 19 GB | ~25 GB |
+| 80B | 43 GB | ~50 GB |
+| 122B | ~65 GB | ~70 GB |
+| 235B | ~130 GB | ~140 GB |
+
+For larger models, use an external NVMe drive:
+```bash
+mlx-sniper download qwen3-next-80b -o /Volumes/MySSD/qwen3-next-80b
+mlx-sniper run /Volumes/MySSD/qwen3-next-80b -p "hello" -v
+```
+
 ### How Flash Streaming Works
 
 Split the model by access pattern:
