@@ -54,7 +54,25 @@ More models coming. To request a model, open an issue.
 | M1/M2/M3/M4 | 16 GB | Qwen3.5-35B-A3B at 5.4 tok/s |
 | M1/M2/M3/M4 Pro/Max | 32 GB+ | Larger models, faster speeds |
 
-### What this does NOT support yet
+### Disk Requirements
+
+| Model | Processed size | Free disk needed |
+|-------|---------------|-----------------|
+| 30B / Coder-30B | 17 GB | ~20 GB |
+| 35B | 19 GB | ~25 GB |
+| 80B | 43 GB | ~50 GB |
+| 122B | ~65 GB | ~70 GB |
+| 235B | ~130 GB | ~140 GB |
+
+For larger models, use an external NVMe drive:
+```bash
+mlx-sniper download qwen3-next-80b -o /Volumes/MySSD/qwen3-next-80b
+mlx-sniper run /Volumes/MySSD/qwen3-next-80b -p "hello" -v
+```
+
+Expert streaming works from any mounted volume. Speed scales with drive read bandwidth (~1-3 GB/s on USB-C NVMe, ~5 GB/s on internal).
+
+### Limitations
 - Dense models (only MoE architectures)
 - Non-Qwen models (architecture-specific for now)
 - Windows/Linux (Apple Silicon only for MLX path)
