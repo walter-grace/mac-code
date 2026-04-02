@@ -31,6 +31,15 @@ def cmd_download(args):
     )
 
 
+def cmd_serve(args):
+    from .server import run_server
+    run_server(
+        model_dir=args.model_dir,
+        host=args.host,
+        port=args.port,
+    )
+
+
 def cmd_calibrate(args):
     from .calibrate import calibrate, load_calibration
 
@@ -188,6 +197,12 @@ def main():
     p.add_argument("--full-calibrate", action="store_true", help="Run full calibration with bias sweep")
     p.add_argument("--keep-download", action="store_true", help="Keep raw HF download after preprocessing")
 
+    # serve
+    p = sub.add_parser("serve", help="Ollama-compatible HTTP server")
+    p.add_argument("model_dir", help="Path to sniper model directory")
+    p.add_argument("--port", type=int, default=11434, help="Port (default: 11434)")
+    p.add_argument("--host", default="127.0.0.1", help="Host (default: 127.0.0.1, use 0.0.0.0 for network)")
+
     # calibrate
     p = sub.add_parser("calibrate", help="One-time model calibration (~2-8 min)")
     p.add_argument("model_dir", help="Path to sniper model directory")
@@ -207,7 +222,7 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    {"download": cmd_download, "calibrate": cmd_calibrate, "run": cmd_run}[args.command](args)
+    {"download": cmd_download, "serve": cmd_serve, "calibrate": cmd_calibrate, "run": cmd_run}[args.command](args)
 
 
 if __name__ == "__main__":
