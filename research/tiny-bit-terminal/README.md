@@ -50,6 +50,17 @@ cmake --build build -j$(sysctl -n hw.ncpu) --target llama-server
 huggingface-cli download unsloth/Qwen3.5-9B-GGUF Qwen3.5-9B-UD-IQ2_XXS.gguf --local-dir ./models
 ./build/bin/llama-server -m ./models/Qwen3.5-9B-UD-IQ2_XXS.gguf -ngl 999 -c 4096 --port 8204
 
+# Option C: Gemma 4-26B MoE (IQ2, 9.3 GB — Google's 26B MoE, 36 tok/s on 16GB)
+git clone --depth 1 https://github.com/ggml-org/llama.cpp.git ~/llama.cpp
+cd ~/llama.cpp && cmake -B build -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(sysctl -n hw.ncpu) --target llama-server
+python3 -c "
+from huggingface_hub import hf_hub_download
+hf_hub_download('unsloth/gemma-4-26B-A4B-it-GGUF',
+    'gemma-4-26B-A4B-it-UD-IQ2_M.gguf', local_dir='./models')
+"
+./build/bin/llama-server -m ./models/gemma-4-26B-A4B-it-UD-IQ2_M.gguf -ngl 99 -c 2048 --reasoning off --port 8205
+
 # 4. Run tiny bit (in another terminal)
 cd mac-code/research/tiny-bit-terminal
 npx tsx src/index.tsx --server http://localhost:8203
@@ -106,6 +117,8 @@ The agent uses patterns from [PicoClaw](https://github.com/sipeed/picoclaw):
 | Ministral-3B | 2.15 GB | 15-25 tok/s | Balanced |
 | Qwen3-4B | 2.5 GB | 15-25 tok/s | Good quality |
 | Qwen3.5-9B (IQ2) | 3.19 GB | 1-5 tok/s | Smart, 64K context |
+| **Gemma 4-26B MoE (IQ2)** | **9.3 GB** | **36 tok/s (16GB) / 1.4 tok/s (8GB)** | **Google's MoE, 128 experts** |
+| Gemma 4-26B MoE (Q4) | 16.9 GB | 5 tok/s (16GB) | Higher quality, needs 16GB |
 
 Run `/models` in the terminal to check which are online and get download commands.
 
