@@ -98,6 +98,7 @@ const MODEL_REGISTRY = [
   { id: "qwen4", name: "Qwen3-4B", port: 8213 },
   { id: "qwen9", name: "Qwen3.5-9B", port: 8204 },
   { id: "qwen8", name: "Qwen3-8B", port: 8214 },
+  { id: "gemma4", name: "Gemma 4-26B MoE", port: 8205 },
 ];
 
 interface ChatViewProps {
@@ -119,7 +120,7 @@ const HELP_TEXT = `
 ║ /shell <cmd>     Run a shell command     ║
 ║ /stats           Show server stats       ║
 ║ /document <path> Parse PDF/doc/image       ║
-║ /compare <prompt> Compare Bonsai vs 9B    ║
+║ /compare         Race two models          ║
 ║ /clear           Clear chat history      ║
 ║ /models          List/download models     ║
 ║ /help            Show this help          ║
@@ -717,6 +718,8 @@ for t in doc.tables:
               { name: "Qwen3-4B", size: "2.5 GB", speed: "15-25 tok/s", repo: "unsloth/Qwen3-4B-GGUF", file: "Qwen3-4B-Q4_K_M.gguf", port: 8203 },
               { name: "Qwen3.5-9B (IQ2_XXS)", size: "3.19 GB", speed: "1-5 tok/s", repo: "unsloth/Qwen3.5-9B-GGUF", file: "Qwen3.5-9B-UD-IQ2_XXS.gguf", port: 8204 },
               { name: "Qwen3-8B", size: "5.0 GB", speed: "5-15 tok/s", repo: "unsloth/Qwen3-8B-GGUF", file: "Qwen3-8B-Q4_K_M.gguf", port: 8204 },
+              { name: "Gemma 4-26B MoE (IQ2)", size: "9.3 GB", speed: "36 tok/s (16GB) / 1.4 tok/s (8GB)", repo: "unsloth/gemma-4-26B-A4B-it-GGUF", file: "gemma-4-26B-A4B-it-UD-IQ2_M.gguf", port: 8205, note: "build llama.cpp from source + --reasoning off" },
+              { name: "Gemma 4-26B MoE (Q4)", size: "16.9 GB", speed: "5 tok/s (16GB)", repo: "unsloth/gemma-4-26B-A4B-it-GGUF", file: "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf", port: 8205, note: "build llama.cpp from source + --reasoning off" },
             ];
             let info = "◆ Available Models:\n\n";
             for (const m of modelList) {
