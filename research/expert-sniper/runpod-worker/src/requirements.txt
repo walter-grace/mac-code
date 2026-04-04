@@ -1,0 +1,3 @@
+runpod
+python-dotenv
+openai
