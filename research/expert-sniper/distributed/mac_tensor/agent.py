@@ -2,19 +2,17 @@
 """
 mac-tensor agent — Interactive agentic REPL backed by distributed expert nodes.
 
-The model can call tools by emitting XML tags in its response. The agent
-parses tool calls, executes them, and feeds the results back into the
-conversation until the model produces a final answer.
+The model can call tools by emitting XML tags. We use STOP SEQUENCES so
+generation halts the moment a closing tag appears, parse the tool call,
+execute it, then feed the result back into the SAME KV cache (no reset).
 
 Tools:
   <read>path</read>             — read a file
   <ls>path</ls>                 — list directory contents
-  <shell>command</shell>        — run a shell command (read-only by default)
+  <shell>command</shell>        — run a read-only shell command
   <search>query</search>        — DuckDuckGo web search
+  <python>expr</python>         — restricted python eval
   <write path="...">content</write>  — write a file (requires --write)
-  <python>code</python>         — eval python expression
-
-The model sees tool results in <result> tags and continues from there.
 """
 
 import argparse
@@ -25,40 +23,40 @@ import subprocess
 import sys
 import urllib.parse
 import urllib.request
-from pathlib import Path
+from collections import deque
 
 
-SYSTEM_PROMPT = """You are an autonomous coding agent running on a distributed Apple Silicon cluster. You can call tools by emitting XML tags in your response. The user will see your tool calls and their results, then you'll continue to the next step.
+# ============================================================
+# SYSTEM PROMPT
+# ============================================================
 
-Available tools:
+SYSTEM_PROMPT = """You are a coding agent on an Apple Silicon cluster. You answer the user by either:
+  (a) calling ONE tool and stopping, or
+  (b) giving a short final answer with no tags.
 
-<read>path</read>
-  Read a file. Path can be relative or absolute. Use ~ for home.
-  Example: <read>~/projects/main.py</read>
+Rules — these are critical:
+1. NEVER write a <result> tag yourself. The system inserts results.
+2. After emitting a tool call, STOP. Do not write anything else.
+3. Use exactly ONE tool per step. The system runs it and shows you the result.
+4. When you have enough information, give a SHORT final answer (1-3 sentences).
+5. Do not repeat yourself. Do not loop.
 
-<ls>path</ls>
-  List directory contents. Use . for current directory.
-  Example: <ls>.</ls>
+Tools:
+  <read>path</read>           Read a file (use ~ for home).
+  <ls>path</ls>               List a directory.
+  <shell>cmd</shell>          Run a read-only shell command.
+  <search>query</search>      Web search (DuckDuckGo).
+  <python>expr</python>       Eval a Python expression.
 
-<shell>command</shell>
-  Run a read-only shell command. Avoid destructive operations.
-  Example: <shell>git status</shell>
+Example interaction:
 
-<search>query</search>
-  Search the web via DuckDuckGo. Returns top results.
-  Example: <search>MLX expert sniper benchmarks</search>
+User: What's in the README?
+You: <read>README.md</read>
+[system inserts: <result># My Project\\nA tool for X.</result>]
+You: The README describes a tool for X.
 
-<python>code</python>
-  Evaluate a Python expression (read-only, no imports beyond stdlib).
-  Example: <python>len([1,2,3])</python>
-
-How to use tools:
-1. When you need information, emit ONE tool call and stop. Wait for the result.
-2. After seeing the <result>, decide your next step.
-3. When you have enough information, give the user a final answer in plain text (no tags).
-4. Be concise. Don't narrate every step — just call tools and show results.
-
-The user is asking:"""
+Now the user asks:
+"""
 
 
 # ============================================================
@@ -67,119 +65,108 @@ The user is asking:"""
 
 
 def tool_read(arg):
-    """Read a file."""
     try:
         path = os.path.expanduser(arg.strip())
         with open(path) as f:
             content = f.read()
-        # Cap at 8000 chars to avoid blowing the context
-        if len(content) > 8000:
-            content = content[:8000] + f"\n\n[... truncated, {len(content) - 8000} more chars ...]"
+        if len(content) > 4000:
+            content = content[:4000] + f"\n\n[truncated, {len(content) - 4000} more chars]"
         return content
     except Exception as e:
         return f"Error reading {arg}: {e}"
 
 
 def tool_ls(arg):
-    """List directory."""
     try:
         path = os.path.expanduser(arg.strip())
         items = sorted(os.listdir(path))
         out = []
-        for item in items[:100]:
+        for item in items[:50]:
             full = os.path.join(path, item)
-            if os.path.isdir(full):
-                out.append(f"  {item}/")
-            else:
-                size = os.path.getsize(full)
-                out.append(f"  {item} ({size} bytes)")
-        if len(items) > 100:
-            out.append(f"  ... and {len(items) - 100} more")
+            out.append(f"  {item}{'/' if os.path.isdir(full) else ''}")
+        if len(items) > 50:
+            out.append(f"  ... ({len(items) - 50} more)")
         return "\n".join(out) if out else "(empty)"
     except Exception as e:
-        return f"Error listing {arg}: {e}"
+        return f"Error: {e}"
 
 
 def tool_shell(arg, allow_write=False):
-    """Run a shell command."""
     cmd = arg.strip()
-
-    # Block obvious destructive commands unless --write
     if not allow_write:
-        DANGEROUS = ["rm ", "rm\n", "rm\t", "mv ", "dd ", "mkfs", ">", ">>",
-                     "chmod", "chown", "sudo", "kill", "shutdown", "reboot",
-                     "format", "fdisk", ":(){"]
+        DANGEROUS = ["rm ", "mv ", "dd ", "mkfs", ">", ">>", "chmod",
+                     "chown", "sudo", "kill", "shutdown", "format", "fdisk"]
         for d in DANGEROUS:
             if d in cmd.lower():
-                return f"Refused (potentially destructive: '{d}'). Pass --write to allow."
-
+                return f"Refused (destructive: '{d}')"
     try:
-        result = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=20
-        )
-        out = result.stdout.strip()
-        err = result.stderr.strip()
+        result = subprocess.run(cmd, shell=True, capture_output=True,
+                                text=True, timeout=15)
+        out = (result.stdout or "").strip()
+        err = (result.stderr or "").strip()
         if not out and not err:
             return f"(exit {result.returncode}, no output)"
         parts = []
         if out:
-            if len(out) > 4000:
-                out = out[:4000] + f"\n... [truncated]"
-            parts.append(out)
+            parts.append(out[:2000] + ("..." if len(out) > 2000 else ""))
         if err:
-            if len(err) > 1000:
-                err = err[:1000] + "..."
-            parts.append(f"[stderr] {err}")
+            parts.append(f"[stderr] {err[:500]}")
         if result.returncode != 0:
             parts.append(f"[exit {result.returncode}]")
         return "\n".join(parts)
     except subprocess.TimeoutExpired:
-        return "Error: command timed out (20s limit)"
+        return "Error: timeout (15s)"
     except Exception as e:
         return f"Error: {e}"
 
 
 def tool_search(arg):
-    """DuckDuckGo HTML search."""
     query = arg.strip()
     try:
         url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
         req = urllib.request.Request(
             url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            },
+            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                                    "AppleWebKit/537.36"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
-
-        # Extract result links + snippets with regex
         results = []
         pattern = re.compile(
             r'class="result__a"[^>]*>([^<]+)</a>.*?'
-            r'class="result__snippet"[^>]*>([^<]+)</a>',
+            r'class="result__snippet"[^>]*>(.+?)</a>',
             re.DOTALL,
         )
-        for m in pattern.finditer(html)[:5]:
+        for m in list(pattern.finditer(html))[:4]:
             title = re.sub(r"\s+", " ", m.group(1).strip())
-            snippet = re.sub(r"<[^>]+>", "", m.group(2)).strip()
-            snippet = re.sub(r"\s+", " ", snippet)
-            results.append(f"• {title}\n  {snippet[:200]}")
-
-        if not results:
-            return "No results"
-        return "\n\n".join(results[:5])
+            snippet = re.sub(r"<[^>]+>", "", m.group(2))
+            snippet = re.sub(r"\s+", " ", snippet).strip()[:160]
+            results.append(f"• {title}\n  {snippet}")
+        return "\n\n".join(results) if results else "No results"
     except Exception as e:
         return f"Search failed: {e}"
 
 
-def tool_write(arg, content, allow_write=False):
-    """Write a file."""
-    if not allow_write:
-        return "Refused. File writes require --write flag."
+def tool_python(arg):
     try:
-        path = os.path.expanduser(arg.strip())
+        safe = {
+            "abs": abs, "all": all, "any": any, "bool": bool, "chr": chr,
+            "dict": dict, "divmod": divmod, "enumerate": enumerate, "filter": filter,
+            "float": float, "hex": hex, "int": int, "len": len, "list": list,
+            "map": map, "max": max, "min": min, "ord": ord, "pow": pow,
+            "range": range, "reversed": reversed, "round": round, "set": set,
+            "sorted": sorted, "str": str, "sum": sum, "tuple": tuple, "zip": zip,
+        }
+        return str(eval(arg.strip(), {"__builtins__": safe}, {}))
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def tool_write(path_arg, content, allow_write=False):
+    if not allow_write:
+        return "Refused. Pass --write to enable."
+    try:
+        path = os.path.expanduser(path_arg.strip())
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w") as f:
             f.write(content)
@@ -188,91 +175,72 @@ def tool_write(arg, content, allow_write=False):
         return f"Error: {e}"
 
 
-def tool_python(arg):
-    """Eval a python expression."""
-    try:
-        # Restricted eval — no imports, no builtins beyond a safe set
-        safe_builtins = {
-            "abs": abs, "all": all, "any": any, "bin": bin, "bool": bool,
-            "chr": chr, "dict": dict, "divmod": divmod, "enumerate": enumerate,
-            "filter": filter, "float": float, "hex": hex, "int": int,
-            "len": len, "list": list, "map": map, "max": max, "min": min,
-            "oct": oct, "ord": ord, "pow": pow, "range": range, "reversed": reversed,
-            "round": round, "set": set, "sorted": sorted, "str": str, "sum": sum,
-            "tuple": tuple, "type": type, "zip": zip, "print": print,
-        }
-        result = eval(arg.strip(), {"__builtins__": safe_builtins}, {})
-        return str(result)
-    except Exception as e:
-        return f"Error: {e}"
-
-
 # ============================================================
-# PARSER + AGENT LOOP
+# TOOL PARSER
 # ============================================================
 
-
-TOOL_PATTERN = re.compile(
-    r"<(read|ls|shell|search|python|write)(?:\s+([^>]*))?>(.+?)</\1>",
+# Match opening + content + closing tag. Tools have NO attributes except <write>.
+TOOL_REGEX = re.compile(
+    r"<(read|ls|shell|search|python)>(.+?)</\1>",
+    re.DOTALL,
+)
+WRITE_REGEX = re.compile(
+    r'<write\s+path="([^"]+)">(.+?)</write>',
     re.DOTALL,
 )
 
-
-def parse_tool_call(text):
-    """Find the FIRST tool call in the text. Returns (tool, args, content) or None."""
-    m = TOOL_PATTERN.search(text)
-    if not m:
-        return None
-    tool = m.group(1)
-    attrs = m.group(2) or ""
-    content = m.group(3)
-    return (tool, attrs, content, m.start(), m.end())
+# Stop sequences for early generation halt
+STOP_SEQUENCES = [
+    "</read>", "</ls>", "</shell>", "</search>", "</python>", "</write>",
+]
 
 
-def execute_tool(tool, attrs, content, allow_write=False):
-    """Run a tool and return its result string."""
-    if tool == "read":
-        return tool_read(content)
-    elif tool == "ls":
-        return tool_ls(content)
-    elif tool == "shell":
-        return tool_shell(content, allow_write=allow_write)
-    elif tool == "search":
-        return tool_search(content)
-    elif tool == "python":
-        return tool_python(content)
-    elif tool == "write":
-        # Parse path attribute
-        path_match = re.search(r'path="([^"]+)"', attrs)
-        if not path_match:
-            return "Error: <write> requires path attribute"
-        return tool_write(path_match.group(1), content, allow_write=allow_write)
-    else:
-        return f"Unknown tool: {tool}"
+def parse_first_tool(text):
+    """Find the first complete tool call. Returns dict or None."""
+    # Check write first (it has attributes)
+    m = WRITE_REGEX.search(text)
+    if m:
+        return {"tool": "write", "path": m.group(1), "content": m.group(2),
+                "start": m.start(), "end": m.end()}
+    m = TOOL_REGEX.search(text)
+    if m:
+        return {"tool": m.group(1), "content": m.group(2),
+                "start": m.start(), "end": m.end()}
+    return None
+
+
+def execute_tool(call, allow_write=False):
+    t = call["tool"]
+    if t == "read":   return tool_read(call["content"])
+    if t == "ls":     return tool_ls(call["content"])
+    if t == "shell":  return tool_shell(call["content"], allow_write=allow_write)
+    if t == "search": return tool_search(call["content"])
+    if t == "python": return tool_python(call["content"])
+    if t == "write":  return tool_write(call["path"], call["content"], allow_write=allow_write)
+    return f"Unknown tool: {t}"
 
 
 # ============================================================
-# DISTRIBUTED LLM BACKEND
+# DISTRIBUTED LLM BACKEND WITH PERSISTENT CACHE
 # ============================================================
 
 
-class DistributedBackend:
-    """Wraps the distributed engine as a simple LLM call interface."""
+class AgentBackend:
+    """Wraps the distributed engine with token-level generation, stop sequences,
+    and repetition penalty. Maintains a SINGLE KV cache across the whole turn —
+    we never reset it between tool calls, we just append the result tokens.
+    """
 
     def __init__(self, model_key, node_urls):
         self.model_key = model_key
         self.node_urls = node_urls
         self.engine = None
-        self.history = []  # list of (role, content) tuples
 
     def load(self):
-        """Load the appropriate distributed engine."""
-        # Add the parent dir to path so we can import the coordinator scripts
         script_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
         sys.path.insert(0, script_dir)
 
         if self.model_key == "gemma4":
-            # Gemma 4 needs the custom model from cli-agent path
             cli_agent_src = os.path.expanduser("~/cli-agent/src")
             if os.path.exists(cli_agent_src):
                 sys.path.insert(0, cli_agent_src)
@@ -284,30 +252,211 @@ class DistributedBackend:
 
         self.engine.load()
 
-    def chat(self, prompt, max_tokens=300, temperature=0.6):
-        """Generate a response. The engine handles its own KV cache."""
-        # We use the engine's generate() method which handles chat templates
-        return self.engine.generate(prompt, max_tokens=max_tokens, temperature=temperature)
-
     def reset(self):
         self.engine.reset_cache()
 
+    def encode(self, text):
+        if self.model_key == "gemma4":
+            return self.engine.encode(text)
+        # Qwen — use the underlying transformers tokenizer
+        return self.engine.tokenizer.encode(text)
+
+    def decode(self, ids):
+        if self.model_key == "gemma4":
+            return self.engine.decode(ids)
+        return self.engine.tokenizer.decode(ids, skip_special_tokens=False)
+
+    def encode_chat_prefix(self, system_and_user_text):
+        """Wrap the prompt in the model's chat template."""
+        if self.model_key == "gemma4":
+            return self.engine.encode_chat(system_and_user_text)
+        # Qwen — apply chat template via the HF tokenizer
+        try:
+            messages = [{"role": "user", "content": system_and_user_text}]
+            text = self.engine.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+            )
+            return self.engine.tokenizer.encode(text)
+        except Exception:
+            return self.encode(system_and_user_text)
+
+    def feed_tokens(self, token_ids):
+        """Run forward on a batch of new tokens. Returns final logits.
+
+        Token IDs are appended to the existing KV cache — no reset.
+        """
+        import mlx.core as mx
+        ids = mx.array([token_ids])
+        logits = self.engine.forward(ids)
+        mx.eval(logits)
+        return logits
+
+    def generate_until_stop(self, prompt_text, stop_sequences,
+                             max_tokens=400, temperature=0.5,
+                             repetition_penalty=1.15, repetition_window=64,
+                             on_chunk=None):
+        """Generate tokens until any stop sequence appears or max_tokens hit.
+
+        Returns the generated text (excluding the stop sequence itself).
+
+        Uses persistent KV cache: if you call this multiple times in a row,
+        each call appends to the same cache.
+        """
+        import mlx.core as mx
+        import numpy as np
+
+        # Encode and feed the prompt
+        prompt_ids = self.encode_chat_prefix(prompt_text)
+        logits = self.feed_tokens(prompt_ids)
+
+        generated_ids = []
+        recent = deque(maxlen=repetition_window)
+        decoded_buffer = ""
+
+        # EOS tokens
+        if self.model_key == "gemma4":
+            eos_set = {1, 106}  # <eos>, <turn|>
+        else:
+            eos_set = {248044, 248046}
+
+        for step in range(max_tokens):
+            # Get last-token logits
+            last_logits = logits[0, -1]
+
+            # Apply repetition penalty
+            if recent and repetition_penalty != 1.0:
+                last_np = np.array(last_logits.astype(mx.float32))
+                for tid in set(recent):
+                    if last_np[tid] > 0:
+                        last_np[tid] /= repetition_penalty
+                    else:
+                        last_np[tid] *= repetition_penalty
+                last_logits = mx.array(last_np)
+
+            # Sample
+            if temperature <= 0:
+                next_token = int(mx.argmax(last_logits).item())
+            else:
+                probs = mx.softmax(last_logits / temperature, axis=-1)
+                next_token = int(mx.random.categorical(mx.log(probs + 1e-10)).item())
+
+            generated_ids.append(next_token)
+            recent.append(next_token)
+
+            if next_token in eos_set:
+                break
+
+            # Update decoded buffer (decode all generated_ids fresh because of BPE)
+            new_decoded = self.decode(generated_ids)
+            new_chunk = new_decoded[len(decoded_buffer):]
+            decoded_buffer = new_decoded
+
+            if on_chunk and new_chunk:
+                on_chunk(new_chunk)
+
+            # Check stop sequences
+            stop_hit = None
+            for s in stop_sequences:
+                if s in decoded_buffer:
+                    stop_hit = s
+                    break
+            if stop_hit:
+                break
+
+            # Feed the new token to the cache for the next step
+            logits = self.feed_tokens([next_token])
+
+        return decoded_buffer
+
 
 # ============================================================
-# MAIN AGENT LOOP
+# AGENT LOOP
 # ============================================================
 
 
-def agent_loop(backend, max_iterations=8, max_tokens=400, allow_write=False):
-    """Run the interactive agent REPL."""
+def run_agent_turn(backend, user_question, max_iterations=6, max_tokens=400,
+                   temperature=0.5, allow_write=False, verbose=True):
+    """Run one user turn — multi-step tool use loop."""
+    backend.reset()  # Fresh KV cache per user turn
+
+    # Initial prompt
+    prompt = SYSTEM_PROMPT + " " + user_question
+
+    final_answer = None
+
+    for step in range(max_iterations):
+        if verbose:
+            print(f"\n  [Step {step + 1}/{max_iterations}]", end=" ", flush=True)
+
+        def stream_chunk(chunk):
+            if verbose:
+                # Strip the model's attempts to invent <result> tags from display
+                print(chunk, end="", flush=True)
+
+        # First step uses the full prompt; subsequent steps just feed result tokens
+        if step == 0:
+            text = backend.generate_until_stop(
+                prompt,
+                stop_sequences=STOP_SEQUENCES + ["</result>"],
+                max_tokens=max_tokens,
+                temperature=temperature,
+                on_chunk=stream_chunk,
+            )
+        else:
+            # Continuation: feed only the new tokens (result + nudge)
+            text = backend.generate_until_stop(
+                continuation,
+                stop_sequences=STOP_SEQUENCES + ["</result>"],
+                max_tokens=max_tokens,
+                temperature=temperature,
+                on_chunk=stream_chunk,
+            )
+
+        # Strip any hallucinated <result>...</result> the model wrote
+        text = re.sub(r"<result>.*?</result>", "", text, flags=re.DOTALL)
+
+        # Parse first tool call
+        call = parse_first_tool(text)
+
+        if call is None:
+            # No tool call → final answer
+            final_answer = text.strip()
+            if verbose:
+                print()
+            break
+
+        # Execute the tool
+        tool_name = call["tool"]
+        tool_arg = call.get("content", "")[:60].replace("\n", " ")
+        if verbose:
+            print(f"\n  → tool: <{tool_name}> {tool_arg}...")
+
+        result = execute_tool(call, allow_write=allow_write)
+        if verbose:
+            preview = result[:120].replace("\n", " | ")
+            print(f"  ← {preview}{'...' if len(result) > 120 else ''}")
+
+        # Build the continuation prompt for the next step.
+        # We feed: the model's tool call + a real <result>...</result> + a nudge
+        continuation = (
+            f"<result>\n{result}\n</result>\n\n"
+            f"Now either call another tool or give a final answer (no tags):"
+        )
+
+    if final_answer is None:
+        final_answer = "(hit iteration limit without producing a final answer)"
+
+    return final_answer
+
+
+def agent_loop(backend, max_iterations=6, max_tokens=400, allow_write=False):
     print()
     print("=" * 60)
-    print("  mac-tensor agent")
+    print("  mac-tensor agent (v2 — stop sequences + repetition penalty)")
     print(f"  Model: {backend.model_key} | Nodes: {len(backend.node_urls)}")
     print(f"  Tools: read, ls, shell, search, python" + (", write" if allow_write else ""))
     print("=" * 60)
-    print()
-    print("Type your question. Type 'reset' to clear context, 'quit' to exit.")
+    print("\nType your question. 'reset' to clear, 'quit' to exit.")
     print("-" * 60)
 
     while True:
@@ -327,76 +476,32 @@ def agent_loop(backend, max_iterations=8, max_tokens=400, allow_write=False):
             print("Context cleared.")
             continue
 
-        # Build the agent prompt
-        prompt = f"{SYSTEM_PROMPT} {user_input}"
+        answer = run_agent_turn(
+            backend, user_input,
+            max_iterations=max_iterations,
+            max_tokens=max_tokens,
+            allow_write=allow_write,
+        )
 
-        # Iterate: call model → parse tool → execute → feed back
-        iteration = 0
-        accumulated = ""
-
-        while iteration < max_iterations:
-            iteration += 1
-            print(f"\n[Step {iteration}/{max_iterations}] Thinking...")
-
-            try:
-                response = backend.chat(prompt, max_tokens=max_tokens, temperature=0.5)
-            except Exception as e:
-                print(f"  ERROR: {e}")
-                break
-
-            # Look for a tool call in the response
-            call = parse_tool_call(response)
-
-            if call is None:
-                # No tool call → final answer
-                print("\nAgent:")
-                print(response.strip())
-                break
-
-            tool, attrs, content, start, end = call
-
-            # Show what the model decided to do
-            preview = content[:80].replace("\n", " ")
-            print(f"  → Calling <{tool}>: {preview}...")
-
-            # Execute the tool
-            result = execute_tool(tool, attrs, content, allow_write=allow_write)
-            result_preview = result[:200].replace("\n", " | ")
-            print(f"  ← Result: {result_preview}{'...' if len(result) > 200 else ''}")
-
-            # Append to the conversation: model's request + tool result
-            tool_call_text = response[start:end]
-            prompt = (
-                f"{prompt}\n{response[:end]}\n"
-                f"<result>\n{result}\n</result>\n"
-                f"Continue: either call another tool or give the final answer."
-            )
-
-            # Reset the engine's cache between tool calls so it processes the
-            # full updated prompt fresh (otherwise the KV cache is stale)
-            backend.reset()
-        else:
-            print(f"\n[Hit {max_iterations} iteration limit]")
+        print(f"\n\nAgent: {answer}\n")
 
 
 def main(args):
-    """Entry point called from cli.py."""
     if not args.nodes:
         print("Error: --nodes is required")
-        print("Example: mac-tensor agent --model gemma4 --nodes http://mac2:8401,http://mac3:8401")
         sys.exit(1)
 
     node_urls = [u.strip() for u in args.nodes.split(",")]
     model_key = args.model or "gemma4"
 
     print(f"Loading {model_key} distributed engine...")
-    backend = DistributedBackend(model_key=model_key, node_urls=node_urls)
+    backend = AgentBackend(model_key=model_key, node_urls=node_urls)
     backend.load()
 
     agent_loop(
         backend,
-        max_iterations=args.max_iterations or 8,
-        max_tokens=args.max_tokens or 400,
+        max_iterations=args.max_iterations or 6,
+        max_tokens=args.max_tokens or 300,
         allow_write=args.write,
     )
 
@@ -405,9 +510,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", choices=["qwen35", "gemma4"], default="gemma4")
     parser.add_argument("--nodes", required=True)
-    parser.add_argument("--max-iterations", type=int, default=8)
-    parser.add_argument("--max-tokens", type=int, default=400)
-    parser.add_argument("--write", action="store_true",
-                        help="Allow file writes and destructive shell commands")
+    parser.add_argument("--max-iterations", type=int, default=6)
+    parser.add_argument("--max-tokens", type=int, default=300)
+    parser.add_argument("--write", action="store_true")
     args = parser.parse_args()
     main(args)
