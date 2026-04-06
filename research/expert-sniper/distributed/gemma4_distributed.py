@@ -156,6 +156,18 @@ class Gemma4DistributedEngine:
             return self.tokenizer.encode(text).ids
         return self.tokenizer.encode(text)
 
+    def encode_chat(self, prompt):
+        """Encode a user message in Gemma 4 chat format.
+
+        Format: <bos><|turn>user\\n{prompt}<turn|>\\n<|turn>model\\n
+        Token IDs: bos=2, turn_start=105, turn_end=106, newline=107
+        """
+        NL = chr(10)
+        prompt_toks = self.encode(prompt)
+        user_toks = self.encode("user" + NL)
+        model_toks = self.encode("model" + NL)
+        return [2, 105] + user_toks + prompt_toks + [106, 107, 105] + model_toks
+
     def decode(self, ids):
         if self._use_fast_tok:
             return self.tokenizer.decode(ids)
@@ -246,9 +258,8 @@ class Gemma4DistributedEngine:
 
     def generate(self, prompt, max_tokens=200, temperature=0.7):
         """Generate with streaming output."""
-        # Build chat template manually for Gemma 4
-        text = f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
-        tokens = self.encode(text)
+        # Use proper Gemma 4 chat template (turn_start=105, turn_end=106)
+        tokens = self.encode_chat(prompt)
 
         generated = []
         input_ids = mx.array([tokens])
