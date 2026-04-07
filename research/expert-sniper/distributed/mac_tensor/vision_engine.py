@@ -58,7 +58,26 @@ class VisionGemma4Sniper:
 
     def load(self):
         """Load all three components."""
-        from moe_agent_gemma4 import MoESniperEngineGemma4
+        # Make sure the existing single-machine sniper code is importable
+        SNIPER_PATHS = [
+            os.path.expanduser("~/expert-sniper-mlx"),
+            os.path.expanduser("~/cli-agent/src"),
+        ]
+        for p in SNIPER_PATHS:
+            if os.path.isdir(p) and p not in sys.path:
+                sys.path.insert(0, p)
+
+        try:
+            from moe_agent_gemma4 import MoESniperEngineGemma4
+        except ImportError as e:
+            raise ImportError(
+                "Could not import moe_agent_gemma4. The vision engine wraps "
+                "the existing single-machine sniper. Make sure these directories "
+                "exist and contain the sniper code:\n"
+                f"  ~/expert-sniper-mlx/moe_agent_gemma4.py\n"
+                f"  ~/cli-agent/src/mlx_expert_sniper/models/gemma4.py\n"
+                f"Original error: {e}"
+            )
         from mlx_vlm.models.gemma4 import VisionModel, VisionConfig, Gemma4ImageProcessor
         from mlx_vlm.models.gemma4.gemma4 import MultimodalEmbedder
 
