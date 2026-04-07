@@ -186,12 +186,48 @@ def run_server(model_key, node_urls=None, host="0.0.0.0", port=8500, allow_write
                 backend.reset()
         return {"ok": True}
 
+    # When running as leader, lazily build a backend from the swarm registry.
+    # We cache it and rebuild when the partition_version changes.
+    leader_backend_state = {"backend": None, "version": -1}
+
+    def get_swarm_backend():
+        """Lazy backend that uses live peers from the swarm registry.
+
+        Rebuilds when partition_version changes. Returns None if no live peers.
+        """
+        if swarm_registry is None:
+            return backend  # static mode
+
+        live_peers = [p for p in swarm_registry.get_live_peers() if p.get("alive")]
+        if not live_peers:
+            return None
+
+        # Check if registry version changed → rebuild backend
+        current_version = swarm_registry.partition_version
+        if leader_backend_state["version"] != current_version or leader_backend_state["backend"] is None:
+            print(f"[swarm] building backend for {len(live_peers)} peers (v{current_version})")
+            from .agent import AgentBackend
+            node_urls = [p["url"] for p in live_peers]
+            try:
+                bk = AgentBackend(model_key=model_key, node_urls=node_urls)
+                bk.load()
+                leader_backend_state["backend"] = bk
+                leader_backend_state["version"] = current_version
+            except Exception as e:
+                print(f"[swarm] backend load failed: {e}")
+                return None
+
+        return leader_backend_state["backend"]
+
     @app.post("/api/chat")
     async def chat(request: Request):
-        if backend is None:
+        # Use the static backend if not in swarm mode, else build from registry
+        active = get_swarm_backend() if swarm_registry is not None else backend
+
+        if active is None:
             return JSONResponse({
-                "error": "no LLM backend loaded — this server is a swarm leader without "
-                         "a coordinator. Phase 2 will add on-demand backend loading."
+                "error": "no live peers in swarm yet — run `mac-tensor join "
+                         f"http://{_local_ip()}:{port}` on a worker Mac first"
             }, status_code=503)
 
         body = await request.json()
@@ -206,7 +242,7 @@ def run_server(model_key, node_urls=None, host="0.0.0.0", port=8500, allow_write
             with lock:
                 try:
                     for event in run_agent_turn_stream(
-                        backend, message,
+                        active, message,
                         max_iterations=max_iterations,
                         max_tokens=max_tokens,
                         allow_write=allow_write,
