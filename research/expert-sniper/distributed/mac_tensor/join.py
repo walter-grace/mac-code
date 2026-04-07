@@ -34,7 +34,28 @@ HEARTBEAT_INTERVAL = 20.0  # seconds
 
 
 def get_local_ip():
-    """Best-effort: figure out our outward-facing IP."""
+    """Best-effort: figure out our outward-facing IP.
+
+    Prefers a Tailscale IP if tailscaled is running locally (so the leader
+    can reach us via the tailnet), otherwise falls back to the public IP
+    discovered via the 8.8.8.8 trick.
+    """
+    # 1. Try Tailscale (if installed via build-from-source on a Mac)
+    for sock_path in ("/tmp/tailscaled.sock", "/var/run/tailscale/tailscaled.sock"):
+        for ts_bin in ("/Users/m1/go-workspace/bin/tailscale",
+                        os.path.expanduser("~/go-workspace/bin/tailscale"),
+                        "tailscale"):
+            try:
+                out = subprocess.check_output(
+                    [ts_bin, f"--socket={sock_path}", "ip"],
+                    stderr=subprocess.DEVNULL, timeout=3,
+                ).decode().strip().splitlines()
+                if out and out[0].startswith("100."):
+                    return out[0]
+            except Exception:
+                continue
+
+    # 2. Fall back to outbound IP detection
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
