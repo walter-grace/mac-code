@@ -25,6 +25,8 @@ import urllib.parse
 import urllib.request
 from collections import deque
 
+import numpy as np
+
 
 # ============================================================
 # SYSTEM PROMPTS
