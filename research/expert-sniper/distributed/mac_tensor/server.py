@@ -20,13 +20,15 @@ from queue import Queue, Empty
 
 def run_server(model_key, node_urls=None, host="0.0.0.0", port=8500, allow_write=False,
                vision=False, stream_dir=None, source_dir=None,
-               falcon=False, falcon_model=None):
+               falcon=False, falcon_model=None,
+               swarm_leader=False):
     """Start the FastAPI server with the agent backend pre-loaded.
 
-    Three modes:
+    Modes:
       - Distributed text-only: pass node_urls
       - Single-machine vision (Gemma 4 only): vision=True
       - Vision + Falcon Perception (segmentation): vision=True, falcon=True
+      - Swarm leader: swarm_leader=True (peer registry + dynamic coordinator)
     """
     from fastapi import FastAPI, Request, UploadFile, File, Form
     from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
@@ -34,6 +36,13 @@ def run_server(model_key, node_urls=None, host="0.0.0.0", port=8500, allow_write
 
     vision_engine = None
     falcon_tools = None
+    swarm_registry = None
+
+    if swarm_leader:
+        from .swarm import SwarmRegistry, reaper_loop
+        swarm_registry = SwarmRegistry(model_key=model_key)
+        threading.Thread(target=reaper_loop, args=(swarm_registry,), daemon=True).start()
+        print(f"Swarm registry started (model={model_key})")
 
     if vision:
         print(f"Loading vision Gemma 4 sniper (single-machine)...")
@@ -97,7 +106,67 @@ def run_server(model_key, node_urls=None, host="0.0.0.0", port=8500, allow_write
             "allow_write": allow_write,
             "vision": vision,
             "falcon": falcon_tools is not None,
+            "swarm_leader": swarm_registry is not None,
         }
+
+    # ============================================================
+    # Swarm endpoints (only when running as leader)
+    # ============================================================
+
+    if swarm_registry is not None:
+
+        @app.post("/swarm/register")
+        async def swarm_register(request: Request):
+            body = await request.json()
+            url = body.get("url")
+            mem_gb = body.get("mem_gb", 0)
+            meta = body.get("meta", {})
+            if not url:
+                return JSONResponse({"error": "url required"}, status_code=400)
+            peer_id, partition = swarm_registry.register(url, mem_gb, meta)
+            print(f"[swarm] +peer {peer_id} at {url} → partition {partition}")
+            return {
+                "peer_id": peer_id,
+                "partition": partition,
+                "model": model_key,
+                "partition_version": swarm_registry.partition_version,
+            }
+
+        @app.post("/swarm/heartbeat")
+        async def swarm_heartbeat(request: Request):
+            body = await request.json()
+            peer_id = body.get("peer_id")
+            if not peer_id:
+                return JSONResponse({"error": "peer_id required"}, status_code=400)
+            ok, version = swarm_registry.heartbeat(peer_id)
+            if not ok:
+                return JSONResponse({"error": "unknown peer"}, status_code=404)
+
+            # Tell the peer if its partition has been reassigned
+            current_partition = None
+            with swarm_registry.lock:
+                if peer_id in swarm_registry.peers:
+                    current_partition = swarm_registry.peers[peer_id]["partition"]
+
+            return {
+                "ok": True,
+                "partition_version": version,
+                "partition": current_partition,
+            }
+
+        @app.post("/swarm/leave")
+        async def swarm_leave(request: Request):
+            body = await request.json()
+            peer_id = body.get("peer_id")
+            if not peer_id:
+                return JSONResponse({"error": "peer_id required"}, status_code=400)
+            swarm_registry.leave(peer_id)
+            print(f"[swarm] -peer {peer_id} (graceful leave)")
+            return {"ok": True}
+
+        @app.get("/swarm/peers")
+        async def swarm_peers():
+            return swarm_registry.status()
 
     @app.post("/api/reset")
     async def reset():

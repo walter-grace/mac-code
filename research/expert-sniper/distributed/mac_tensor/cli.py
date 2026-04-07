@@ -721,6 +721,23 @@ Local commands (run on the Mac itself):
                       help="Vision: also load Falcon Perception for grounded segmentation")
     p_ui.add_argument("--falcon-model", help="Vision: path to Falcon Perception model dir")
 
+    # Swarm: leader (peer registry + UI)
+    p_ld = sub.add_parser("leader", help="Run as swarm leader (peer registry + chat UI)")
+    p_ld.add_argument("--model", choices=SUPPORTED_MODELS.keys(), default="gemma4")
+    p_ld.add_argument("--host", default="0.0.0.0")
+    p_ld.add_argument("--port", type=int, default=8500)
+
+    # Swarm: join (worker registers with leader, runs expert node)
+    p_jn = sub.add_parser("join", help="Join a swarm as a worker peer")
+    p_jn.add_argument("leader", help="Leader URL, e.g. http://leader-ip:8500")
+    p_jn.add_argument("--model", choices=SUPPORTED_MODELS.keys(), default="gemma4")
+    p_jn.add_argument("--model-dir", help="Path to streaming model dir (default ~/models/<model>-stream)")
+    p_jn.add_argument("--port", type=int, default=9301, help="Port for the local expert node")
+
+    # Swarm: peers (list peers in a swarm)
+    p_pr = sub.add_parser("peers", help="List peers in a swarm")
+    p_pr.add_argument("leader", help="Leader URL, e.g. http://leader-ip:8500")
+
     # Bench (throughput benchmark)
     p_bn = sub.add_parser("bench", help="Throughput benchmark — concurrent clients hitting a UI server")
     p_bn.add_argument("--server", default="http://localhost:8500", help="UI server URL")
@@ -748,6 +765,45 @@ Local commands (run on the Mac itself):
         from .bench import main as bench_main
         bench_main(args)
 
+    def cmd_leader(args):
+        # Run the UI server in swarm leader mode
+        from .server import run_server
+        run_server(
+            model_key=args.model,
+            node_urls=None,
+            host=args.host,
+            port=args.port,
+            swarm_leader=True,
+        )
+
+    def cmd_join(args):
+        from .join import main as join_main
+        join_main(args)
+
+    def cmd_peers(args):
+        import urllib.request
+        url = args.leader.rstrip("/") + "/swarm/peers"
+        try:
+            with urllib.request.urlopen(url, timeout=5) as r:
+                data = json.loads(r.read())
+        except Exception as e:
+            print(f"Error fetching peers from {args.leader}: {e}")
+            sys.exit(1)
+
+        print(f"Swarm @ {args.leader}")
+        print(f"  Model:    {data['model']}")
+        print(f"  Peers:    {data['peer_count']}")
+        print(f"  Version:  {data['partition_version']}")
+        print()
+        if not data["peers"]:
+            print("  (no peers registered)")
+            return
+        for p in data["peers"]:
+            status = "OK" if p["alive"] else "DEAD"
+            print(f"  [{status}] {p['id']}  partition={p['partition']:>10s}  "
+                  f"ram={p['mem_gb']}GB  uptime={p['uptime_s']:.0f}s  "
+                  f"  hb={p['last_heartbeat_s_ago']:.0f}s  {p['url']}")
+
     commands = {
         "init": cmd_init,
         "deploy": cmd_deploy,
@@ -763,6 +819,9 @@ Local commands (run on the Mac itself):
         "agent": cmd_agent,
         "ui": cmd_ui,
         "bench": cmd_bench,
+        "leader": cmd_leader,
+        "join": cmd_join,
+        "peers": cmd_peers,
     }
 
     commands[args.command](args)
