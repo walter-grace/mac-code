@@ -138,17 +138,29 @@ def run_server(model_key, node_urls=None, host="0.0.0.0", port=8500, allow_write
                      "Connection": "keep-alive"},
         )
 
+    # Build a vision agent backend if Falcon is loaded
+    vision_agent = None
+    if vision_engine is not None and falcon_tools is not None:
+        from .agent import VisionAgentBackend
+        vision_agent = VisionAgentBackend(
+            vision_engine=vision_engine, falcon_tools=falcon_tools
+        )
+        print("Vision agent ready (Gemma 4 + Falcon Perception chained).")
+
     @app.post("/api/chat_vision")
     async def chat_vision(
         message: str = Form(...),
-        max_tokens: int = Form(200),
+        max_tokens: int = Form(300),
         image: UploadFile = File(None),
     ):
-        """Vision chat endpoint — accepts an optional image upload."""
+        """Vision chat endpoint — accepts an optional image upload.
+
+        If Falcon Perception is loaded, uses the vision agent loop with
+        tool calling. Otherwise falls back to plain Gemma 4 vision.
+        """
         if vision_engine is None:
             return JSONResponse({"error": "vision mode not enabled"}, status_code=400)
 
-        # Save uploaded image to a temp file
         image_path = None
         if image is not None and image.filename:
             import tempfile
@@ -160,31 +172,35 @@ def run_server(model_key, node_urls=None, host="0.0.0.0", port=8500, allow_write
         def event_stream():
             with lock:
                 try:
-                    yield f"data: {json.dumps({'type': 'step_start', 'step': 1, 'max': 1})}\n\n"
-
-                    chunks = []
-                    def on_chunk(text):
-                        chunks.append(text)
-
-                    output = vision_engine.generate(
-                        message,
-                        image_path=image_path,
-                        max_tokens=max_tokens,
-                        temperature=0.6,
-                        on_chunk=on_chunk,
-                    )
-
-                    for chunk in chunks:
-                        yield f"data: {json.dumps({'type': 'token', 'text': chunk})}\n\n"
-
-                    yield f"data: {json.dumps({'type': 'final', 'text': output.strip()})}\n\n"
-                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                    if vision_agent is not None and image_path:
+                        # Chained mode: Gemma 4 + Falcon tool calls
+                        from .agent import run_vision_agent_turn_stream
+                        for event in run_vision_agent_turn_stream(
+                            vision_agent, message, image_path,
+                            max_iterations=4,
+                            max_tokens=max_tokens,
+                        ):
+                            yield f"data: {json.dumps(event)}\n\n"
+                    else:
+                        # Simple mode: just Gemma 4 vision (no tools)
+                        yield f"data: {json.dumps({'type': 'step_start', 'step': 1, 'max': 1})}\n\n"
+                        chunks = []
+                        def on_chunk(text):
+                            chunks.append(text)
+                        output = vision_engine.generate(
+                            message, image_path=image_path,
+                            max_tokens=max_tokens, temperature=0.6,
+                            on_chunk=on_chunk,
+                        )
+                        for chunk in chunks:
+                            yield f"data: {json.dumps({'type': 'token', 'text': chunk})}\n\n"
+                        yield f"data: {json.dumps({'type': 'final', 'text': output.strip()})}\n\n"
+                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
                     yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
                 finally:
-                    # Clean up temp image
                     if image_path and os.path.exists(image_path):
                         try:
                             os.unlink(image_path)

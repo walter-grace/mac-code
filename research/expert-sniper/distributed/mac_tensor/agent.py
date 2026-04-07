@@ -27,7 +27,7 @@ from collections import deque
 
 
 # ============================================================
-# SYSTEM PROMPT
+# SYSTEM PROMPTS
 # ============================================================
 
 SYSTEM_PROMPT = """You are a coding agent on an Apple Silicon cluster. You answer the user by either:
@@ -54,6 +54,55 @@ User: What's in the README?
 You: <read>README.md</read>
 [system inserts: <result># My Project\\nA tool for X.</result>]
 You: The README describes a tool for X.
+
+Now the user asks:
+"""
+
+
+VISION_SYSTEM_PROMPT = """You are a vision agent on an Apple Silicon cluster. You can see the image the user uploaded, and you have a precision instrument called Falcon Perception that finds exact pixel locations of objects.
+
+Rules:
+1. NEVER write a <result> tag yourself. The system inserts results.
+2. After emitting a tool call, STOP. Wait for the result.
+3. Use ONE tool per step.
+4. When you have enough information, give a SHORT final answer (1-3 sentences) with no tags.
+5. Trust the numbers the tools give you over your own visual estimates.
+
+When to use tools vs answer directly:
+- If the user just wants a description of the image, answer directly. No tools needed.
+- If the user asks "how many" or "where exactly" or "which is largest/closest/leftmost", use grounding tools.
+- If the user asks for spatial relationships (closest, biggest, leftmost), first ground the objects, then use a spatial tool.
+
+Tools:
+
+<ground>object name or short description</ground>
+  Find all instances of an object in the image. Returns a list of masks
+  with id, centroid (x, y in 0-1), area_fraction, region (top-left, center, etc.).
+  Example: <ground>bird</ground>
+
+<extreme slot="object_name" direction="bottommost"/>
+  After grounding, find the most extreme mask in a slot.
+  direction can be: topmost, bottommost, leftmost, rightmost, largest, smallest
+  In a 2D photo, "closest to camera" usually means bottommost (lowest in frame).
+  Example: <extreme slot="bird" direction="bottommost"/>
+
+<count slot="object_name"/>
+  Return the number of masks in a slot.
+  Example: <count slot="bird"/>
+
+Example interaction (single ground):
+User: How many cats are in this image?
+You: <ground>cat</ground>
+[system: <result>{"slot":"cat","count":3,"masks":[{"id":1,...},{"id":2,...},{"id":3,...}]}</result>]
+You: There are 3 cats in the image.
+
+Example interaction (chained):
+User: Which bird is biggest?
+You: <ground>bird</ground>
+[system: <result>{"slot":"bird","count":4,"masks":[...]}</result>]
+You: <extreme slot="bird" direction="largest"/>
+[system: <result>{"winner":{"id":3,"area_fraction":0.18,...}}</result>]
+You: The largest bird is mask #3, taking up about 18% of the image.
 
 Now the user asks:
 """
@@ -181,17 +230,37 @@ def tool_write(path_arg, content, allow_write=False):
 
 # Match opening + content + closing tag. Tools have NO attributes except <write>.
 TOOL_REGEX = re.compile(
-    r"<(read|ls|shell|search|python)>(.+?)</\1>",
+    r"<(read|ls|shell|search|python|ground|count)>(.+?)</\1>",
     re.DOTALL,
 )
 WRITE_REGEX = re.compile(
     r'<write\s+path="([^"]+)">(.+?)</write>',
     re.DOTALL,
 )
+# Self-closing vision tools with attributes
+EXTREME_REGEX = re.compile(
+    r'<extreme\s+slot="([^"]+)"\s+direction="([^"]+)"\s*/>',
+)
+COUNT_ATTR_REGEX = re.compile(
+    r'<count\s+slot="([^"]+)"\s*/>',
+)
+BBOX_REGEX = re.compile(
+    r'<bbox\s+id="?(\d+)"?\s*/>',
+)
 
 # Stop sequences for early generation halt
 STOP_SEQUENCES = [
     "</read>", "</ls>", "</shell>", "</search>", "</python>", "</write>",
+    "</ground>", "</count>",
+    # Self-closing vision tags
+    "/>",
+]
+
+
+VISION_STOP_SEQUENCES = [
+    "</ground>", "</count>",
+    "/>",  # extreme, count attr, bbox
+    "</result>",
 ]
 
 
@@ -202,6 +271,20 @@ def parse_first_tool(text):
     if m:
         return {"tool": "write", "path": m.group(1), "content": m.group(2),
                 "start": m.start(), "end": m.end()}
+    # Self-closing vision tags
+    m = EXTREME_REGEX.search(text)
+    if m:
+        return {"tool": "extreme", "slot": m.group(1), "direction": m.group(2),
+                "content": "", "start": m.start(), "end": m.end()}
+    m = COUNT_ATTR_REGEX.search(text)
+    if m:
+        return {"tool": "count", "slot": m.group(1),
+                "content": "", "start": m.start(), "end": m.end()}
+    m = BBOX_REGEX.search(text)
+    if m:
+        return {"tool": "bbox", "mask_id": int(m.group(1)),
+                "content": "", "start": m.start(), "end": m.end()}
+    # Standard tool tags
     m = TOOL_REGEX.search(text)
     if m:
         return {"tool": m.group(1), "content": m.group(2),
@@ -209,7 +292,7 @@ def parse_first_tool(text):
     return None
 
 
-def execute_tool(call, allow_write=False):
+def execute_tool(call, allow_write=False, falcon_tools=None):
     t = call["tool"]
     if t == "read":   return tool_read(call["content"])
     if t == "ls":     return tool_ls(call["content"])
@@ -217,6 +300,19 @@ def execute_tool(call, allow_write=False):
     if t == "search": return tool_search(call["content"])
     if t == "python": return tool_python(call["content"])
     if t == "write":  return tool_write(call["path"], call["content"], allow_write=allow_write)
+    # Vision tools (require falcon_tools)
+    if falcon_tools is None:
+        return f"Vision tool '{t}' requires Falcon Perception (--falcon)"
+    if t == "ground":
+        return falcon_tools.ground(call["content"].strip())
+    if t == "extreme":
+        return falcon_tools.extreme(call["slot"], call["direction"])
+    if t == "count":
+        # Could be <count>slot</count> or <count slot="X"/>
+        slot = call.get("slot") or call.get("content", "").strip()
+        return falcon_tools.count_slot(slot)
+    if t == "bbox":
+        return falcon_tools.bbox(call["mask_id"])
     return f"Unknown tool: {t}"
 
 
@@ -367,6 +463,275 @@ class AgentBackend:
             logits = self.feed_tokens([next_token])
 
         return decoded_buffer
+
+
+# ============================================================
+# VISION AGENT BACKEND (single-machine with Falcon)
+# ============================================================
+
+
+class VisionAgentBackend:
+    """Wraps VisionGemma4Sniper + FalconPerceptionTools for chained tool use."""
+
+    def __init__(self, vision_engine, falcon_tools=None):
+        self.vision_engine = vision_engine
+        self.falcon_tools = falcon_tools
+
+    def reset(self):
+        self.vision_engine.sniper.reset_cache()
+
+    def encode(self, text):
+        return self.vision_engine.sniper.tokenizer.encode(text).ids
+
+    def decode(self, ids):
+        return self.vision_engine.sniper.tokenizer.decode(ids)
+
+    def feed_tokens_text(self, token_ids):
+        """Feed text-only tokens after the initial vision prefill."""
+        import mlx.core as mx
+        ids = mx.array([token_ids])
+        logits = self.vision_engine.sniper.forward(ids)
+        mx.eval(logits)
+        return logits
+
+    def run_vision_prefill(self, prompt_text, image_path):
+        """Run the initial vision-aware forward pass and return logits."""
+        if self.falcon_tools and image_path:
+            self.falcon_tools.set_image(image_path)
+        tokens, image_features, _ = self.vision_engine.encode_chat(prompt_text, image_path)
+        logits = self.vision_engine._prefill_logits(tokens, image_features)
+        return logits, len(tokens)
+
+
+def _patch_vision_engine_prefill():
+    """Add a _prefill_logits method to VisionGemma4Sniper.
+
+    The original _prefill returns the first sampled token. We need a version
+    that returns the full logits so the agent can apply repetition penalty.
+    """
+    import mlx.core as mx
+    try:
+        from .vision_engine import VisionGemma4Sniper, IMAGE_TOKEN_ID
+    except Exception:
+        return
+
+    if hasattr(VisionGemma4Sniper, "_prefill_logits"):
+        return
+
+    def _prefill_logits(self, input_token_ids, image_features):
+        from mlx_lm.models.base import create_attention_mask
+        from mlx_vlm.models.gemma4.gemma4 import masked_scatter
+        from moe_agent_gemma4 import run_expert_ffn
+
+        self.sniper.reset_cache()
+        input_ids = mx.array([input_token_ids])
+        h = self.sniper.model.model.embed_tokens(input_ids)
+        h = h * (self.sniper.model.args.hidden_size ** 0.5)
+
+        if image_features is not None:
+            image_mask = (input_ids == IMAGE_TOKEN_ID)
+            image_feats_flat = image_features.reshape(-1, image_features.shape[-1])
+            image_feats_flat = image_feats_flat.astype(h.dtype)
+            image_mask_expanded = mx.expand_dims(image_mask, -1)
+            image_mask_expanded = mx.broadcast_to(image_mask_expanded, h.shape)
+            h = masked_scatter(h, image_mask_expanded, image_feats_flat)
+
+        mask = create_attention_mask(h, self.sniper.cache[0] if self.sniper.cache else None)
+
+        for i in range(self.sniper.num_layers):
+            layer = self.sniper.model.model.layers[i]
+            cache_i = self.sniper.cache[i] if self.sniper.cache else None
+            residual = h
+            h_norm = layer.input_layernorm(h)
+            h_attn = layer.self_attn(h_norm, mask=mask, cache=cache_i)
+            h_attn = layer.post_attention_layernorm(h_attn)
+            h = residual + h_attn
+            mx.eval(h)
+
+            residual = h
+            h_ff = layer.pre_feedforward_layernorm(h)
+            h_ff = layer.mlp(h_ff)
+
+            if layer.enable_moe_block:
+                h_dense = layer.post_feedforward_layernorm_1(h_ff)
+                B, L, D = residual.shape
+                residual_flat = residual.reshape(-1, D)
+                router = layer.router
+                x_normed = router._inline_rms_norm(residual_flat)
+                x_normed = x_normed * router.scale * (router.hidden_size ** -0.5)
+                scores = router.proj(x_normed)
+                probs = mx.softmax(scores, axis=-1)
+                top_k_indices = mx.argpartition(-probs, kth=router.top_k - 1, axis=-1)[..., :router.top_k]
+                top_k_weights = mx.take_along_axis(probs, top_k_indices, axis=-1)
+                top_k_weights = top_k_weights / mx.sum(top_k_weights, axis=-1, keepdims=True)
+                expert_scales = router.per_expert_scale[top_k_indices]
+                top_k_weights = top_k_weights * expert_scales
+                moe_input = layer.pre_feedforward_layernorm_2(residual_flat)
+                mx.eval(moe_input, top_k_indices, top_k_weights)
+                top_k_indices_r = top_k_indices.reshape(B, L, -1)
+                top_k_weights_r = top_k_weights.reshape(B, L, -1)
+                active_ids = list(set(int(e) for e in np.array(top_k_indices_r).flatten()))
+                expert_data = self.sniper.reader.get_experts(i, active_ids)
+                moe_input_r = moe_input.reshape(B, L, D)
+                expert_out = run_expert_ffn(moe_input_r, expert_data, top_k_indices_r, top_k_weights_r)
+                h_moe = layer.post_feedforward_layernorm_2(expert_out)
+                h_ff = h_dense + h_moe
+
+            h_ff = layer.post_feedforward_layernorm(h_ff)
+            h = residual + h_ff
+            h = h * layer.layer_scalar
+            mx.eval(h)
+            mx.clear_cache()
+
+        h = self.sniper.model.model.norm(h)
+        if self.sniper.model.args.tie_word_embeddings:
+            logits = self.sniper.model.model.embed_tokens.as_linear(h)
+        else:
+            logits = self.sniper.model.lm_head(h)
+        mx.eval(logits)
+        return logits
+
+    VisionGemma4Sniper._prefill_logits = _prefill_logits
+
+
+_patch_vision_engine_prefill()
+
+
+def run_vision_agent_turn_stream(vision_backend, user_question, image_path,
+                                  max_iterations=4, max_tokens=300,
+                                  temperature=0.5, allow_write=False):
+    """Run one user turn with vision + Falcon tool use."""
+    import mlx.core as mx
+    import json
+    from collections import deque
+
+    vision_backend.reset()
+
+    prompt = VISION_SYSTEM_PROMPT + " " + user_question
+
+    yield {"type": "step_start", "step": 1, "max": max_iterations}
+
+    try:
+        logits, _ = vision_backend.run_vision_prefill(prompt, image_path)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        yield {"type": "error", "message": f"vision prefill failed: {e}"}
+        return
+
+    last_logits = logits[0, -1]
+    if temperature <= 0:
+        next_token = int(mx.argmax(last_logits).item())
+    else:
+        probs = mx.softmax(last_logits / temperature, axis=-1)
+        next_token = int(mx.random.categorical(mx.log(probs + 1e-10)).item())
+
+    eos_set = {1, 106}
+
+    for iteration in range(max_iterations):
+        if iteration > 0:
+            yield {"type": "step_start", "step": iteration + 1, "max": max_iterations}
+
+        generated = [next_token]
+        recent = deque([next_token], maxlen=64)
+        decoded_buffer = vision_backend.decode([next_token])
+        if decoded_buffer:
+            yield {"type": "token", "text": decoded_buffer}
+
+        for step in range(max_tokens):
+            if next_token in eos_set:
+                break
+
+            stop_hit = any(s in decoded_buffer for s in VISION_STOP_SEQUENCES)
+            if stop_hit:
+                break
+
+            try:
+                logits = vision_backend.feed_tokens_text([next_token])
+            except Exception as e:
+                yield {"type": "error", "message": str(e)}
+                return
+
+            last_logits = logits[0, -1]
+
+            if recent:
+                last_np = np.array(last_logits.astype(mx.float32))
+                for tid in set(recent):
+                    if last_np[tid] > 0:
+                        last_np[tid] /= 1.15
+                    else:
+                        last_np[tid] *= 1.15
+                last_logits = mx.array(last_np)
+
+            if temperature <= 0:
+                next_token = int(mx.argmax(last_logits).item())
+            else:
+                probs = mx.softmax(last_logits / temperature, axis=-1)
+                next_token = int(mx.random.categorical(mx.log(probs + 1e-10)).item())
+
+            generated.append(next_token)
+            recent.append(next_token)
+
+            full = vision_backend.decode(generated)
+            new_chunk = full[len(decoded_buffer):]
+            decoded_buffer = full
+            if new_chunk:
+                yield {"type": "token", "text": new_chunk}
+
+        text = re.sub(r"<result>.*?</result>", "", decoded_buffer, flags=re.DOTALL)
+        call = parse_first_tool(text)
+
+        if call is None:
+            final_answer = text.strip()
+            yield {"type": "final", "text": final_answer}
+            yield {"type": "done"}
+            return
+
+        tool_name = call["tool"]
+        tool_args = call.get("content") or call.get("slot") or str(call.get("mask_id", ""))
+        yield {"type": "tool_call", "tool": tool_name, "args": str(tool_args)[:200]}
+
+        result = execute_tool(
+            call, allow_write=allow_write, falcon_tools=vision_backend.falcon_tools
+        )
+
+        if isinstance(result, dict):
+            if "masks" in result:
+                trimmed = []
+                for m in result["masks"]:
+                    trimmed.append({k: v for k, v in m.items() if not k.startswith("_")})
+                result_for_llm = {**result, "masks": trimmed}
+            else:
+                result_for_llm = result
+            result_str = json.dumps(result_for_llm)
+            display_str = json.dumps(result_for_llm, indent=2)[:1500]
+        else:
+            result_str = str(result)
+            display_str = result_str[:1500]
+
+        yield {"type": "tool_result", "result": display_str}
+
+        continuation = (
+            f"<result>{result_str}</result>\n\n"
+            f"Now either call another tool or give a final answer (no tags):"
+        )
+
+        try:
+            cont_tokens = vision_backend.encode(continuation)
+            logits = vision_backend.feed_tokens_text(cont_tokens)
+        except Exception as e:
+            yield {"type": "error", "message": str(e)}
+            return
+
+        last_logits = logits[0, -1]
+        if temperature <= 0:
+            next_token = int(mx.argmax(last_logits).item())
+        else:
+            probs = mx.softmax(last_logits / temperature, axis=-1)
+            next_token = int(mx.random.categorical(mx.log(probs + 1e-10)).item())
+
+    yield {"type": "final", "text": "(iteration limit reached)"}
+    yield {"type": "done"}
 
 
 # ============================================================
