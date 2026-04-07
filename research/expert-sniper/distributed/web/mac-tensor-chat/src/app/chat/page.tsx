@@ -12,12 +12,31 @@ type AgentEvent =
   | { type: "done" }
   | { type: "error"; message: string };
 
+type FalconMask = {
+  id: number;
+  slot: string;
+  area_fraction: number;
+  centroid_norm: { x: number; y: number };
+  bbox_norm: { x1: number; y1: number; x2: number; y2: number };
+  image_region: string;
+};
+
+type FalconResult = {
+  query: string;
+  count: number;
+  mask_ids: number[];
+  masks: FalconMask[];
+  annotated_image: string;
+  elapsed_seconds: number;
+};
+
 type Message = {
   id: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "falcon";
   text: string;
   imageDataUrl?: string;
   toolCalls: { tool: string; args: string; result: string }[];
+  falcon?: FalconResult;
 };
 
 export default function ChatPage() {
@@ -191,6 +210,79 @@ export default function ChatPage() {
     }
   };
 
+  const ground = async () => {
+    if (isStreaming) return;
+    if (!attachedImage) {
+      alert("Attach an image first (📷 button or drag-and-drop)");
+      return;
+    }
+    const query = input.trim();
+    if (!query) {
+      alert('Type what to find (e.g. "bird", "car", "person")');
+      return;
+    }
+
+    const imageDataUrl = previewUrl || undefined;
+    const imgFile = attachedImage;
+    setInput("");
+    setAttachedImage(null);
+    setPreviewUrl("");
+    if (fileRef.current) fileRef.current.value = "";
+
+    const userMsg: Message = {
+      id: crypto.randomUUID(),
+      role: "user",
+      text: `🎯 Find: "${query}"`,
+      imageDataUrl,
+      toolCalls: [],
+    };
+    const placeholderMsg: Message = {
+      id: crypto.randomUUID(),
+      role: "falcon",
+      text: "Running Falcon Perception...",
+      toolCalls: [],
+    };
+    setMessages((m) => [...m, userMsg, placeholderMsg]);
+    setIsStreaming(true);
+
+    try {
+      const fd = new FormData();
+      fd.append("query", query);
+      fd.append("image", imgFile);
+
+      const res = await fetch("/api/falcon", { method: "POST", body: fd });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+      const data: FalconResult = await res.json();
+      setMessages((m) => {
+        const next = [...m];
+        const last = next[next.length - 1];
+        if (last && last.role === "falcon") {
+          next[next.length - 1] = {
+            ...last,
+            text: `Found ${data.count} ${data.count === 1 ? "instance" : "instances"} of "${query}" in ${data.elapsed_seconds}s`,
+            falcon: data,
+          };
+        }
+        return next;
+      });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setMessages((m) => {
+        const next = [...m];
+        const last = next[next.length - 1];
+        if (last && last.role === "falcon") {
+          next[next.length - 1] = { ...last, text: `Error: ${msg}` };
+        }
+        return next;
+      });
+    } finally {
+      setIsStreaming(false);
+    }
+  };
+
   const reset = async () => {
     await fetch("/api/chat", { method: "POST", body: new FormData() }).catch(
       () => null,
@@ -253,59 +345,111 @@ export default function ChatPage() {
             </div>
           )}
 
-          {messages.map((m) => (
-            <div
-              key={m.id}
-              className={`flex flex-col gap-2 ${m.role === "user" ? "items-end" : "items-start"}`}
-            >
-              <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                {m.role === "user" ? "You" : "Agent"}
-              </div>
+          {messages.map((m) => {
+            const labelMap = {
+              user: "You",
+              assistant: "Agent",
+              falcon: "Falcon Perception",
+            };
+            const borderMap = {
+              user: "border-cyan-500/30 bg-cyan-500/10",
+              assistant: "border-indigo-500/20 bg-indigo-500/5",
+              falcon: "border-orange-500/30 bg-orange-500/5",
+            };
+            const labelColorMap = {
+              user: "text-cyan-400",
+              assistant: "text-indigo-400",
+              falcon: "text-orange-400",
+            };
+            return (
               <div
-                className={`max-w-[85%] rounded-2xl px-5 py-3 ${
-                  m.role === "user"
-                    ? "border border-cyan-500/30 bg-cyan-500/10"
-                    : "border border-indigo-500/20 bg-indigo-500/5"
-                }`}
+                key={m.id}
+                className={`flex flex-col gap-2 ${m.role === "user" ? "items-end" : "items-start"}`}
               >
-                {m.imageDataUrl && (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={m.imageDataUrl}
-                    alt=""
-                    className="mb-3 max-h-64 rounded-lg border border-slate-700"
-                  />
-                )}
-                {m.toolCalls.map((tc, i) => (
-                  <details
-                    key={i}
-                    className="mb-2 rounded-lg border border-orange-500/30 bg-orange-500/5 px-3 py-2 text-sm"
-                  >
-                    <summary className="cursor-pointer">
-                      <span className="font-mono text-orange-400">
-                        ⚙ &lt;{tc.tool}&gt;
+                <div
+                  className={`text-xs font-semibold uppercase tracking-wider ${labelColorMap[m.role]}`}
+                >
+                  {labelMap[m.role]}
+                </div>
+                <div
+                  className={`max-w-[85%] rounded-2xl border px-5 py-3 ${borderMap[m.role]}`}
+                >
+                  {m.imageDataUrl && (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={m.imageDataUrl}
+                      alt=""
+                      className="mb-3 max-h-64 rounded-lg border border-slate-700"
+                    />
+                  )}
+                  {m.toolCalls.map((tc, i) => (
+                    <details
+                      key={i}
+                      className="mb-2 rounded-lg border border-orange-500/30 bg-orange-500/5 px-3 py-2 text-sm"
+                    >
+                      <summary className="cursor-pointer">
+                        <span className="font-mono text-orange-400">
+                          ⚙ &lt;{tc.tool}&gt;
+                        </span>
+                        <span className="ml-2 text-slate-400">
+                          {tc.args.slice(0, 60)}
+                        </span>
+                      </summary>
+                      <pre className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap text-xs text-slate-400">
+                        {tc.result}
+                      </pre>
+                    </details>
+                  ))}
+                  <div className="whitespace-pre-wrap text-base leading-relaxed">
+                    {m.text || (
+                      <span className="italic text-slate-500">
+                        {m === messages[messages.length - 1] && stepInfo
+                          ? stepInfo
+                          : "..."}
                       </span>
-                      <span className="ml-2 text-slate-400">
-                        {tc.args.slice(0, 60)}
-                      </span>
-                    </summary>
-                    <pre className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap text-xs text-slate-400">
-                      {tc.result}
-                    </pre>
-                  </details>
-                ))}
-                <div className="whitespace-pre-wrap text-base leading-relaxed">
-                  {m.text || (
-                    <span className="italic text-slate-500">
-                      {m === messages[messages.length - 1] && stepInfo
-                        ? stepInfo
-                        : "..."}
-                    </span>
+                    )}
+                  </div>
+                  {m.falcon && (
+                    <div className="mt-3">
+                      <div className="relative inline-block">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={m.falcon.annotated_image}
+                          alt="annotated"
+                          className="max-w-full rounded-lg border border-orange-500/40"
+                        />
+                        <a
+                          href={m.falcon.annotated_image}
+                          download={`falcon-${m.falcon.query.replace(/\s+/g, "_")}.png`}
+                          className="absolute right-2 top-2 rounded-md border border-white/30 bg-black/70 px-2 py-1 text-xs text-white hover:bg-black/90"
+                        >
+                          ⬇ Download
+                        </a>
+                      </div>
+                      {m.falcon.masks.length > 0 && (
+                        <div className="mt-3 space-y-1 text-xs text-slate-400">
+                          {m.falcon.masks.map((mask) => {
+                            const cx = (mask.centroid_norm.x * 100).toFixed(0);
+                            const cy = (mask.centroid_norm.y * 100).toFixed(0);
+                            const area = (mask.area_fraction * 100).toFixed(1);
+                            return (
+                              <div key={mask.id}>
+                                <span className="text-orange-400">
+                                  #{mask.id}
+                                </span>{" "}
+                                — {mask.image_region}, center ({cx}%, {cy}%),
+                                area {area}%
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </main>
 
@@ -358,6 +502,14 @@ export default function ChatPage() {
               disabled={isStreaming}
               className="flex-1 resize-none rounded-xl border border-slate-700 bg-slate-800/30 px-4 py-3 text-base text-white placeholder-slate-500 focus:border-indigo-500 focus:outline-none disabled:opacity-50"
             />
+            <button
+              onClick={ground}
+              disabled={isStreaming || !attachedImage || !input.trim()}
+              className="h-12 rounded-xl border border-orange-500/40 bg-orange-500/10 px-4 font-semibold text-orange-300 transition hover:bg-orange-500/20 disabled:opacity-40"
+              title="Ground: directly call Falcon Perception with the typed query (skips agent reasoning). Needs an image attached."
+            >
+              🎯 Ground
+            </button>
             <button
               onClick={send}
               disabled={isStreaming || !input.trim()}
