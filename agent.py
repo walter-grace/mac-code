@@ -18,11 +18,22 @@ from rich.live import Live
 from rich.padding import Padding
 from rich.columns import Columns
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "mlx"))
+from model_registry import (
+    get_models,
+    get_model,
+    add_model,
+    remove_model,
+    scan_models,
+    reset_models,
+)
+
 SERVER = os.environ.get("LLAMA_URL", "http://localhost:8000")
 
 # ── Self-improvement: failure logging ─────────────
 LOGS_DIR = Path.home() / ".mac-code" / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
 
 def log_interaction(query, intent, response, speed, grade=None, error=None):
     """Log every interaction for self-improvement training data."""
@@ -34,11 +45,12 @@ def log_interaction(query, intent, response, speed, grade=None, error=None):
         "speed": speed,
         "grade": grade,  # "good", "bad", or None (ungraded)
         "error": error,
-        "model": get_current_model() if 'get_current_model' in dir() else "unknown",
+        "model": get_current_model() if "get_current_model" in dir() else "unknown",
     }
     log_file = LOGS_DIR / f"interactions-{datetime.now().strftime('%Y-%m-%d')}.jsonl"
     with open(log_file, "a") as f:
         f.write(json.dumps(entry) + "\n")
+
 
 def get_failure_stats():
     """Show stats from logged interactions."""
@@ -62,69 +74,112 @@ def get_failure_stats():
                 pass
 
     return {"total": total, "graded": graded, "intents": intents, "errors": errors}
+
+
 PICOCLAW = os.path.expanduser("~/Desktop/qwen/picoclaw/build/picoclaw-darwin-arm64")
 console = Console()
 
-# ── model configs ─────────────────────────────────
-MODELS = {
-    "9b": {
-        "path": os.path.expanduser("~/models/Qwen3.5-9B-Q4_K_M.gguf"),
-        "ctx": 32768,
-        "flags": "--flash-attn on --n-gpu-layers 99 --reasoning off -t 4",
-        "name": "Qwen3.5-9B",
-        "detail": "8.95B dense · Q4_K_M · 32K ctx",
-        "good_for": "tool calling, long conversations, agent tasks",
-    },
-    "35b": {
-        "path": os.path.expanduser("~/models/Qwen3.5-35B-A3B-UD-IQ2_M.gguf"),
-        "ctx": 8192,
-        "flags": "--flash-attn on --n-gpu-layers 99 --reasoning off -np 1 -t 4",
-        "name": "Qwen3.5-35B-A3B",
-        "detail": "MoE 34.7B · 3B active · IQ2_M · 8K ctx",
-        "good_for": "reasoning, math, knowledge, fast answers",
-    },
-}
-
 # ── smart routing ─────────────────────────────────
 TOOL_KEYWORDS = [
-    "search", "find", "look up", "google", "what time", "when do",
-    "when is", "when does", "when are", "who do", "who is playing",
-    "who plays", "who won", "what happened", "what is the score",
-    "weather", "news", "latest", "schedule", "score", "tonight",
-    "today", "tomorrow", "yesterday", "this week", "next game",
-    "play next", "playing next", "results", "standings",
-    "price", "stock", "market", "crypto", "bitcoin",
-    "fetch", "download", "read file", "write file",
-    "create file", "run", "execute", "list files", "show me",
-    "open", "browse", "url", "http", "website",
-    "how much", "where is", "directions", "recipe",
-    "explore", "repo", "repository", "github", "tell me more",
-    "more about", "what else", "continue", "go deeper",
+    "search",
+    "find",
+    "look up",
+    "google",
+    "what time",
+    "when do",
+    "when is",
+    "when does",
+    "when are",
+    "who do",
+    "who is playing",
+    "who plays",
+    "who won",
+    "what happened",
+    "what is the score",
+    "weather",
+    "news",
+    "latest",
+    "schedule",
+    "score",
+    "tonight",
+    "today",
+    "tomorrow",
+    "yesterday",
+    "this week",
+    "next game",
+    "play next",
+    "playing next",
+    "results",
+    "standings",
+    "price",
+    "stock",
+    "market",
+    "crypto",
+    "bitcoin",
+    "fetch",
+    "download",
+    "read file",
+    "write file",
+    "create file",
+    "run",
+    "execute",
+    "list files",
+    "show me",
+    "open",
+    "browse",
+    "url",
+    "http",
+    "website",
+    "how much",
+    "where is",
+    "directions",
+    "recipe",
+    "explore",
+    "repo",
+    "repository",
+    "github",
+    "tell me more",
+    "more about",
+    "what else",
+    "continue",
+    "go deeper",
 ]
+
 
 def classify_intent(message):
     """Ask LLM to classify: 'search', 'shell', or 'chat'. One fast call (~1s)."""
     try:
-        result, _ = llm_call([
-            {"role": "system", "content": """Classify the user's request into exactly one category. Reply with ONLY the category word, nothing else.
+        result, _ = llm_call(
+            [
+                {
+                    "role": "system",
+                    "content": """Classify the user's request into exactly one category. Reply with ONLY the category word, nothing else.
 
 Categories:
 - search: needs web search (news, scores, weather, prices, current events, looking up info online)
 - shell: needs filesystem or command execution (find files, list directories, read/write files, run commands, look at desktop, explore folders, check disk space, anything involving the local computer)
 - chat: general conversation, reasoning, math, coding questions, explanations (no tools needed)
 
-Reply with ONLY one word: search, shell, or chat"""},
-            {"role": "user", "content": message},
-        ], max_tokens=5, temperature=0.0)
+Reply with ONLY one word: search, shell, or chat""",
+                },
+                {"role": "user", "content": message},
+            ],
+            max_tokens=5,
+            temperature=0.0,
+        )
         return result.strip().lower().split()[0]
     except Exception:
         return "chat"
 
+
 def generate_shell_command(query, work_dir="."):
     """Ask LLM to generate the right shell command for a file/system task."""
     home = os.path.expanduser("~")
-    result, _ = llm_call([
-        {"role": "system", "content": f"""You are a macOS shell command generator. The user's home directory is {home}. Current working directory is {work_dir}.
+    result, _ = llm_call(
+        [
+            {
+                "role": "system",
+                "content": f"""You are a macOS shell command generator. The user's home directory is {home}. Current working directory is {work_dir}.
 
 Generate a single shell command that accomplishes the user's request. Output ONLY the command, nothing else. No explanation, no markdown, no backticks.
 
@@ -135,10 +190,15 @@ Examples:
 - "show me python files in this project" → find . -name "*.py" -type f
 - "read the readme" → cat README.md
 - "what's running on port 8000" → lsof -i :8000
-- "count lines of code" → find . -name "*.py" -exec wc -l {{}} +"""},
-        {"role": "user", "content": query},
-    ], max_tokens=100, temperature=0.0)
-    return result.strip().strip('`').strip()
+- "count lines of code" → find . -name "*.py" -exec wc -l {{}} +""",
+            },
+            {"role": "user", "content": query},
+        ],
+        max_tokens=100,
+        temperature=0.0,
+    )
+    return result.strip().strip("`").strip()
+
 
 def run_smart_tool(query, work_dir="."):
     """Execute a shell command generated by the LLM, feed results back."""
@@ -150,8 +210,9 @@ def run_smart_tool(query, work_dir="."):
 
     # Step 2: Execute it
     try:
-        result = sp.run(cmd, shell=True, capture_output=True, text=True,
-                       timeout=30, cwd=work_dir)
+        result = sp.run(
+            cmd, shell=True, capture_output=True, text=True, timeout=30, cwd=work_dir
+        )
         output = result.stdout[:8000]
         if result.stderr:
             output += f"\n{result.stderr[:2000]}"
@@ -162,12 +223,22 @@ def run_smart_tool(query, work_dir="."):
 
     # Step 3: LLM summarizes results (~2-3s)
     today = datetime.now().strftime("%A, %B %d, %Y")
-    content, timings = llm_call([
-        {"role": "system", "content": f"Today is {today}. You ran a shell command and got results. Present the results clearly to the user. If it's a file listing, format it nicely. If it's code, use formatting. Be helpful and concise."},
-        {"role": "user", "content": f"Command: {cmd}\nOutput:\n{output}\n\nOriginal question: {query}"},
-    ], max_tokens=1000)
+    content, timings = llm_call(
+        [
+            {
+                "role": "system",
+                "content": f"Today is {today}. You ran a shell command and got results. Present the results clearly to the user. If it's a file listing, format it nicely. If it's code, use formatting. Be helpful and concise.",
+            },
+            {
+                "role": "user",
+                "content": f"Command: {cmd}\nOutput:\n{output}\n\nOriginal question: {query}",
+            },
+        ],
+        max_tokens=1000,
+    )
 
     return content, timings.get("predicted_per_second", 0), cmd
+
 
 def run_file_tool(query, work_dir="."):
     """Execute file/exec operations directly in Python, feed results to LLM."""
@@ -193,10 +264,13 @@ def run_file_tool(query, work_dir="."):
             tool_name = f"list_dir({path})"
             tool_output = "\n".join(entries[:50])
             if len(entries) > 50:
-                tool_output += f"\n... and {len(entries)-50} more"
+                tool_output += f"\n... and {len(entries) - 50} more"
 
         # Read file
-        elif any(kw in lower for kw in ["read file", "show me", "look at", "cat ", "what's in"]):
+        elif any(
+            kw in lower
+            for kw in ["read file", "show me", "look at", "cat ", "what's in"]
+        ):
             # Find file path in the query
             path = None
             for token in query.split():
@@ -219,13 +293,30 @@ def run_file_tool(query, work_dir="."):
                 tool_name = "read_file(not found)"
 
         # Write file
-        elif any(kw in lower for kw in ["write file", "write a file", "create file", "create a file",
-                                          "create a new", "save file", "save to", "save this"]):
+        elif any(
+            kw in lower
+            for kw in [
+                "write file",
+                "write a file",
+                "create file",
+                "create a file",
+                "create a new",
+                "save file",
+                "save to",
+                "save this",
+            ]
+        ):
             # LLM decides what to write
-            content, _ = llm_call([
-                {"role": "system", "content": "The user wants to create/write a file. Generate ONLY the file content. No explanations."},
-                {"role": "user", "content": query},
-            ], max_tokens=2000)
+            content, _ = llm_call(
+                [
+                    {
+                        "role": "system",
+                        "content": "The user wants to create/write a file. Generate ONLY the file content. No explanations.",
+                    },
+                    {"role": "user", "content": query},
+                ],
+                max_tokens=2000,
+            )
 
             # Extract filename from query
             filename = None
@@ -248,11 +339,17 @@ def run_file_tool(query, work_dir="."):
             cmd = query
             for prefix in ["execute ", "run "]:
                 if lower.startswith(prefix):
-                    cmd = query[len(prefix):]
+                    cmd = query[len(prefix) :]
                     break
 
-            result = sp.run(cmd, shell=True, capture_output=True, text=True,
-                          timeout=30, cwd=work_dir)
+            result = sp.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=work_dir,
+            )
             tool_name = f"exec({cmd.strip()[:40]})"
             tool_output = result.stdout[:5000]
             if result.stderr:
@@ -267,21 +364,33 @@ def run_file_tool(query, work_dir="."):
 
     # Feed tool output to LLM for final answer
     today = datetime.now().strftime("%A, %B %d, %Y")
-    content, timings = llm_call([
-        {"role": "system", "content": f"Today is {today}. You executed a tool and got results. Summarize the results clearly for the user. If it's code, format it nicely."},
-        {"role": "user", "content": f"Tool: {tool_name}\nResult:\n{tool_output}\n\nOriginal question: {query}"},
-    ], max_tokens=1000)
+    content, timings = llm_call(
+        [
+            {
+                "role": "system",
+                "content": f"Today is {today}. You executed a tool and got results. Summarize the results clearly for the user. If it's code, format it nicely.",
+            },
+            {
+                "role": "user",
+                "content": f"Tool: {tool_name}\nResult:\n{tool_output}\n\nOriginal question: {query}",
+            },
+        ],
+        max_tokens=1000,
+    )
 
     return content, timings.get("predicted_per_second", 0), tool_name
 
+
 def llm_call(messages, max_tokens=300, temperature=0.1):
     """Single LLM call, returns content + timings."""
-    payload = json.dumps({
-        "model": "local",
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-    }).encode()
+    payload = json.dumps(
+        {
+            "model": "local",
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+    ).encode()
     req = urllib.request.Request(
         f"{SERVER}/v1/chat/completions",
         data=payload,
@@ -289,6 +398,7 @@ def llm_call(messages, max_tokens=300, temperature=0.1):
     )
     d = json.loads(urllib.request.urlopen(req, timeout=60).read())
     return d["choices"][0]["message"]["content"], d.get("timings", {})
+
 
 def quick_search(query):
     """LLM rewrites query → DuckDuckGo search → LLM answers. ~5-8s total."""
@@ -301,15 +411,23 @@ def quick_search(query):
             return None
 
     from datetime import datetime
+
     today = datetime.now().strftime("%A, %B %d, %Y")
 
     # Step 1: LLM rewrites query into optimal search terms (~1s)
     try:
-        search_query, _ = llm_call([
-            {"role": "system", "content": f"Today is {today}. Rewrite the user's question into an optimal web search query that will find current, specific data (not articles about announcements). Include 'today' or 'tonight' and the full date for time-sensitive queries. Add words like 'scores', 'results', 'live', or 'now' when looking for current data. Output ONLY the search query string, nothing else."},
-            {"role": "user", "content": query},
-        ], max_tokens=30, temperature=0.0)
-        search_query = search_query.strip().strip('"\'')
+        search_query, _ = llm_call(
+            [
+                {
+                    "role": "system",
+                    "content": f"Today is {today}. Rewrite the user's question into an optimal web search query that will find current, specific data (not articles about announcements). Include 'today' or 'tonight' and the full date for time-sensitive queries. Add words like 'scores', 'results', 'live', or 'now' when looking for current data. Output ONLY the search query string, nothing else.",
+                },
+                {"role": "user", "content": query},
+            ],
+            max_tokens=30,
+            temperature=0.0,
+        )
+        search_query = search_query.strip().strip("\"'")
     except Exception:
         search_query = query
 
@@ -333,17 +451,23 @@ def quick_search(query):
         return None
 
     # Combine all snippets
-    snippets = "\n".join([f"- {r.get('title','')}: {r.get('body','')}" for r in all_results])
+    snippets = "\n".join(
+        [f"- {r.get('title', '')}: {r.get('body', '')}" for r in all_results]
+    )
 
     # Check if snippets actually contain useful data or just meta descriptions
     # If total snippet text is mostly generic, fetch the best page
     import re as _re
+
     page_content = ""
     snippet_words = len(snippets.split())
 
     # Heuristic: check if snippets have actual specific data
     # Numbers with context (times, scores, prices) count. Generic "live scores available" doesn't.
-    specific_patterns = _re.findall(r'\d{1,2}:\d{2}\s*(?:p\.m\.|a\.m\.|ET|PT)|\$[\d,.]+|\d+-\d+(?:\s*(?:win|loss|final))', snippets.lower())
+    specific_patterns = _re.findall(
+        r"\d{1,2}:\d{2}\s*(?:p\.m\.|a\.m\.|ET|PT)|\$[\d,.]+|\d+-\d+(?:\s*(?:win|loss|final))",
+        snippets.lower(),
+    )
     has_specifics = len(specific_patterns) >= 2  # need at least 2 specific data points
 
     if not has_specifics and all_results:
@@ -355,10 +479,13 @@ def quick_search(query):
                 continue
             try:
                 jina_url = f"https://r.jina.ai/{url}"
-                req = urllib.request.Request(jina_url, headers={
-                    "User-Agent": "Mozilla/5.0",
-                    "Accept": "text/plain",
-                })
+                req = urllib.request.Request(
+                    jina_url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0",
+                        "Accept": "text/plain",
+                    },
+                )
                 with urllib.request.urlopen(req, timeout=10) as resp:
                     text = resp.read(6000).decode("utf-8", errors="ignore")
                     if len(text) > 200:
@@ -372,12 +499,22 @@ def quick_search(query):
         context += f"\n\nDetailed content from top result:\n{page_content}"
 
     # Step 3: LLM answers using results (~2-3s)
-    content, timings = llm_call([
-        {"role": "system", "content": f"Today is {today}. Answer the user's question using the search results below. Be specific, direct, and detailed. Extract dates, times, scores, names, numbers, prices, and facts. Present them clearly."},
-        {"role": "user", "content": f"Search results:\n\n{context}\n\nQuestion: {query}"},
-    ], max_tokens=1000)
+    content, timings = llm_call(
+        [
+            {
+                "role": "system",
+                "content": f"Today is {today}. Answer the user's question using the search results below. Be specific, direct, and detailed. Extract dates, times, scores, names, numbers, prices, and facts. Present them clearly.",
+            },
+            {
+                "role": "user",
+                "content": f"Search results:\n\n{context}\n\nQuestion: {query}",
+            },
+        ],
+        max_tokens=1000,
+    )
 
     return content, timings.get("predicted_per_second", 0)
+
 
 def get_current_model():
     """Check which model the running server has loaded."""
@@ -394,27 +531,31 @@ def get_current_model():
         pass
     return None
 
+
 def swap_model(target_key):
     """Stop current server and start a new one with the target model."""
-    cfg = MODELS[target_key]
+    cfg = get_model(target_key)
+    if not cfg:
+        return False, f"Unknown model: {target_key}. Use /model list to see available."
     if not os.path.exists(cfg["path"]):
-        return False, f"Model not found: {cfg['path']}"
+        return False, f"Model file not found: {cfg['path']}"
 
-    # Kill current server
     subprocess.run(["pkill", "-f", "llama-server"], capture_output=True)
     time.sleep(3)
 
-    # Start new server
     cmd_list = [
         "llama-server",
-        "--model", cfg["path"],
-        "--port", "8000",
-        "--host", "127.0.0.1",
-        "--ctx-size", str(cfg["ctx"]),
+        "--model",
+        cfg["path"],
+        "--port",
+        "8000",
+        "--host",
+        "127.0.0.1",
+        "--ctx-size",
+        str(cfg["ctx"]),
     ] + cfg["flags"].split()
     subprocess.Popen(cmd_list, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # Wait for ready
     for i in range(30):
         time.sleep(2)
         try:
@@ -428,13 +569,18 @@ def swap_model(target_key):
 
     return False, "Server failed to start"
 
+
 # ── ANSI strip ─────────────────────────────────────
-ANSI_RE = re.compile(r'\x1b\[[0-9;]*m|\r')
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m|\r")
+
+
 def strip_ansi(text):
-    return ANSI_RE.sub('', text)
+    return ANSI_RE.sub("", text)
+
 
 # ── live working display ──────────────────────────
 DOTS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
 
 class WorkingDisplay:
     def __init__(self):
@@ -480,7 +626,18 @@ class WorkingDisplay:
             self.events.append((time.time() - self.start_time, new_phase, detail))
 
         # Keep last few interesting log lines
-        if any(k in lower for k in ["llm_request", "tool_call", "tool_result", "turn_end", "web_search", "fetch", "exec"]):
+        if any(
+            k in lower
+            for k in [
+                "llm_request",
+                "tool_call",
+                "tool_result",
+                "turn_end",
+                "web_search",
+                "fetch",
+                "exec",
+            ]
+        ):
             short = clean
             if ">" in short:
                 short = short.split(">", 1)[-1].strip()
@@ -506,6 +663,7 @@ class WorkingDisplay:
 
         return t
 
+
 # ── detect model ───────────────────────────────────
 def detect_model():
     try:
@@ -521,15 +679,18 @@ def detect_model():
     except Exception:
         return "offline", ""
 
+
 # ── streaming chat (raw mode) ─────────────────────
 def stream_llm(messages):
-    payload = json.dumps({
-        "model": "local",
-        "messages": messages,
-        "max_tokens": 4096,
-        "temperature": 0.7,
-        "stream": True,
-    }).encode()
+    payload = json.dumps(
+        {
+            "model": "local",
+            "messages": messages,
+            "max_tokens": 4096,
+            "temperature": 0.7,
+            "stream": True,
+        }
+    ).encode()
 
     req = urllib.request.Request(
         f"{SERVER}/v1/chat/completions",
@@ -569,6 +730,7 @@ def stream_llm(messages):
 
     return full, tokens, time.time() - start
 
+
 # ── picoclaw agent call with LIVE log streaming ───
 def picoclaw_call_live(message, session="mac-code"):
     """Run picoclaw with real-time log streaming into animated display."""
@@ -578,8 +740,7 @@ def picoclaw_call_live(message, session="mac-code"):
 
     # Launch with Popen — picoclaw writes everything to stdout
     proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
     )
 
     # Read stdout line-by-line in a thread for real-time updates
@@ -595,7 +756,9 @@ def picoclaw_call_live(message, session="mac-code"):
     reader.start()
 
     # Animate while process runs
-    with Live(display.render(), console=console, refresh_per_second=8, transient=True) as live:
+    with Live(
+        display.render(), console=console, refresh_per_second=8, transient=True
+    ) as live:
         while proc.poll() is None:
             live.update(display.render())
             time.sleep(0.12)
@@ -633,6 +796,7 @@ def picoclaw_call_live(message, session="mac-code"):
 
     return response, display.events
 
+
 # ── banner ─────────────────────────────────────────
 def print_banner(model_name, model_detail):
     console.print()
@@ -663,7 +827,10 @@ def print_banner(model_name, model_detail):
 
     console.print()
     console.print(Rule(style="dim"))
-    console.print("  [dim]type [bold bright_cyan]/[/bold bright_cyan] to see all commands[/]\n")
+    console.print(
+        "  [dim]type [bold bright_cyan]/[/bold bright_cyan] to see all commands[/]\n"
+    )
+
 
 # ── render helpers ─────────────────────────────────
 def render_response(response):
@@ -674,6 +841,7 @@ def render_response(response):
         for line in response.split("\n"):
             console.print(f"  {line}")
 
+
 def render_speed(tokens, elapsed):
     if elapsed <= 0 or tokens <= 0:
         return
@@ -683,6 +851,7 @@ def render_speed(tokens, elapsed):
     s.append(f"  {speed:.1f} tok/s", style=f"bold {clr}")
     s.append(f"  ·  {tokens} tokens  ·  {elapsed:.1f}s", style="dim")
     console.print(s)
+
 
 def render_timeline(events):
     """Show a compact summary of what the agent did."""
@@ -706,32 +875,38 @@ def render_timeline(events):
             t.append(" → ", style="dim")
     console.print(t)
 
+
 # ── commands ───────────────────────────────────────
 COMMANDS = [
-    ("/agent",       "Switch to agent mode (tools + web search)"),
-    ("/raw",         "Switch to raw mode (direct streaming, no tools)"),
-    ("/btw",         "Ask a side question without adding to conversation history"),
-    ("/loop",        "Run a prompt on a recurring interval — /loop 5m <prompt>"),
-    ("/branch",      "Save conversation checkpoint you can restore later"),
-    ("/restore",     "Restore last saved conversation checkpoint"),
-    ("/add-dir",     "Set working directory — /add-dir <path>"),
-    ("/save",        "Save conversation to a file — /save <filename>"),
-    ("/search",      "Quick web search — /search <query>"),
-    ("/bench",       "Run a quick speed benchmark"),
-    ("/clear",       "Clear conversation and start fresh"),
-    ("/stats",       "Show session statistics"),
-    ("/model",       "Show or switch model — /model 9b or /model 35b"),
-    ("/auto",        "Toggle smart auto-routing between 9B and 35B"),
-    ("/tools",       "List available agent tools"),
-    ("/system",      "Set system prompt — /system <message>"),
-    ("/compact",     "Toggle compact output (no markdown rendering)"),
-    ("/stop",        "Stop a running /loop"),
-    ("/cost",        "Show estimated cost savings vs cloud APIs"),
-    ("/good",        "Grade last response as good (for self-improvement)"),
-    ("/bad",         "Grade last response as bad (for self-improvement)"),
-    ("/improve",     "Show self-improvement stats from logged interactions"),
-    ("/quit",        "Exit mac code"),
+    ("/agent", "Switch to agent mode (tools + web search)"),
+    ("/raw", "Switch to raw mode (direct streaming, no tools)"),
+    ("/btw", "Ask a side question without adding to conversation history"),
+    ("/loop", "Run a prompt on a recurring interval — /loop 5m <prompt>"),
+    ("/branch", "Save conversation checkpoint you can restore later"),
+    ("/restore", "Restore last saved conversation checkpoint"),
+    ("/add-dir", "Set working directory — /add-dir <path>"),
+    ("/save", "Save conversation to a file — /save <filename>"),
+    ("/search", "Quick web search — /search <query>"),
+    ("/bench", "Run a quick speed benchmark"),
+    ("/clear", "Clear conversation and start fresh"),
+    ("/stats", "Show session statistics"),
+    ("/model", "Show or switch model — /model 9b or /model 35b"),
+    ("/model list", "List all discovered models"),
+    ("/model add", "Add model — /model add <path> [alias]"),
+    ("/model scan", "Scan ~/models/ for new GGUF files"),
+    ("/model rm", "Remove model — /model rm <alias>"),
+    ("/auto", "Toggle smart auto-routing between 9B and 35B"),
+    ("/tools", "List available agent tools"),
+    ("/system", "Set system prompt — /system <message>"),
+    ("/compact", "Toggle compact output (no markdown rendering)"),
+    ("/stop", "Stop a running /loop"),
+    ("/cost", "Show estimated cost savings vs cloud APIs"),
+    ("/good", "Grade last response as good (for self-improvement)"),
+    ("/bad", "Grade last response as bad (for self-improvement)"),
+    ("/improve", "Show self-improvement stats from logged interactions"),
+    ("/quit", "Exit mac code"),
 ]
+
 
 def show_slash_menu(filter_text=""):
     """Print slash commands inline — like Claude Code."""
@@ -746,6 +921,7 @@ def show_slash_menu(filter_text=""):
         line.append(pad)
         line.append(desc, style="dim")
         console.print(line)
+
 
 # ── main ───────────────────────────────────────────
 def main():
@@ -813,35 +989,130 @@ def main():
                 console.print(t)
                 console.print()
                 continue
-            elif exact == "/model":
-                # Check if user passed an argument like "/model 9b"
-                parts = cmd.split()
-                if len(parts) >= 2:
-                    target = parts[1].lower().replace("b", "b")
-                    if target in MODELS:
-                        console.print(f"  [dim]swapping to {MODELS[target]['name']}...[/]")
+            elif exact == "/model" or exact.startswith("/model "):
+                subcmd = cmd[7:].strip() if len(cmd) > 7 else ""
+
+                if subcmd.startswith("list"):
+                    models = get_models()
+                    if not models:
+                        console.print(
+                            "  [dim]no models registered. use /model scan or /model add <path>[/]\n"
+                        )
+                    else:
+                        t = Table(
+                            title=None, show_header=True, box=None, padding=(0, 2)
+                        )
+                        t.add_column("alias", style="bold bright_cyan", width=14)
+                        t.add_column("name", style="white", width=28)
+                        t.add_column("detail", style="dim", max_width=40)
+                        t.add_column("status", width=8)
+                        for alias, info in sorted(models.items()):
+                            status = (
+                                "[bright_green]ok[/]"
+                                if info["exists"]
+                                else "[dim]missing[/]"
+                            )
+                            t.add_row(
+                                alias, info["name"], info.get("detail", ""), status
+                            )
+                        console.print(t)
+                        console.print(
+                            f"  [dim]switch: /model <alias>  ·  add: /model add <path>  ·  scan: /model scan[/]\n"
+                        )
+                    continue
+
+                elif subcmd.startswith("add "):
+                    add_parts = subcmd[4:].strip().split()
+                    if not add_parts:
+                        console.print("  [dim]/model add <path> [alias][/]\n")
+                        continue
+                    add_path = os.path.expanduser(add_parts[0])
+                    add_alias = add_parts[1] if len(add_parts) > 1 else None
+                    alias, msg = add_model(add_path, add_alias)
+                    if alias:
+                        console.print(f"  [bright_green]{msg}[/]")
+                        console.print(f"  [dim]switch to it: /model {alias}[/]\n")
+                    else:
+                        console.print(f"  [bold red]{msg}[/]\n")
+                    continue
+
+                elif subcmd.startswith("scan"):
+                    scan_dir = subcmd[5:].strip() if len(subcmd) > 5 else None
+                    added, msg = scan_models(scan_dir or None)
+                    if added:
+                        for a, n in added:
+                            console.print(f"  [bright_green]+ {a}[/]  [dim]{n}[/]")
+                        console.print(f"  [dim]{msg}[/]\n")
+                    else:
+                        console.print(f"  [dim]{msg}[/]")
+                        console.print(
+                            f"  [dim]place .gguf files in ~/models/ and run /model scan[/]\n"
+                        )
+                    continue
+
+                elif subcmd.startswith("rm "):
+                    rm_alias = subcmd[3:].strip()
+                    ok, msg = remove_model(rm_alias)
+                    console.print(
+                        f"  [{'bright_green' if ok else 'bold red'}]{msg}[/]\n"
+                    )
+                    continue
+
+                elif subcmd.startswith("reset"):
+                    aliases = reset_models()
+                    console.print(
+                        f"  [dim]reset to defaults: {', '.join(aliases)}[/]\n"
+                    )
+                    continue
+
+                elif subcmd:
+                    target = subcmd.lower()
+                    cfg = get_model(target)
+                    if cfg:
+                        console.print(f"  [dim]swapping to {cfg['name']}...[/]")
                         display = WorkingDisplay()
-                        display.phase = f"loading {MODELS[target]['name']}"
-                        with Live(display.render(), console=console, refresh_per_second=8, transient=True) as live:
+                        display.phase = f"loading {cfg['name']}"
+                        with Live(
+                            display.render(),
+                            console=console,
+                            refresh_per_second=8,
+                            transient=True,
+                        ) as live:
                             ok, msg = swap_model(target)
                             while not ok and display.frame < 100:
                                 display.frame += 1
                                 live.update(display.render())
                                 time.sleep(0.2)
                         if ok:
-                            model_name = MODELS[target]["name"]
-                            model_detail = MODELS[target]["detail"]
+                            model_name = cfg["name"]
+                            model_detail = cfg.get("detail", "")
                             console.print(f"  [bold bright_green]{msg}[/]\n")
                         else:
                             console.print(f"  [bold red]{msg}[/]\n")
                     else:
-                        console.print(f"  [dim]available: 9b, 35b[/]\n")
+                        console.print(f"  [dim]unknown model: {target}")
+                        models = get_models()
+                        if models:
+                            console.print(
+                                f"  available: {', '.join(sorted(models.keys()))}[/]\n"
+                            )
+                        else:
+                            console.print(f"  use /model scan to find models[/]\n")
                 else:
                     cur = get_current_model()
                     model_name, model_detail = detect_model()
-                    console.print(f"  [bold white]{model_name}[/]  [dim]{model_detail}[/]")
-                    console.print(f"  [dim]auto-routing: {'on' if auto_route else 'off'}[/]")
-                    console.print(f"  [dim]switch: /model 9b  or  /model 35b[/]\n")
+                    console.print(
+                        f"  [bold white]{model_name}[/]  [dim]{model_detail}[/]"
+                    )
+                    console.print(
+                        f"  [dim]auto-routing: {'on' if auto_route else 'off'}[/]"
+                    )
+                    models = get_models()
+                    if models:
+                        console.print(
+                            f"  [dim]available: {', '.join(sorted(models.keys()))}[/]"
+                        )
+                    console.print()
                 continue
 
             elif exact == "/auto":
@@ -855,10 +1126,14 @@ def main():
                 continue
             elif exact == "/tools":
                 for name, desc in [
-                    ("web_search", "DuckDuckGo"), ("web_fetch", "read URLs"),
-                    ("exec", "shell commands"), ("read_file", "local files"),
-                    ("write_file", "create files"), ("edit_file", "modify files"),
-                    ("list_dir", "browse dirs"), ("subagent", "spawn tasks"),
+                    ("web_search", "DuckDuckGo"),
+                    ("web_fetch", "read URLs"),
+                    ("exec", "shell commands"),
+                    ("read_file", "local files"),
+                    ("write_file", "create files"),
+                    ("edit_file", "modify files"),
+                    ("list_dir", "browse dirs"),
+                    ("subagent", "spawn tasks"),
                 ]:
                     t = Text()
                     t.append("  ▸ ", style="bright_cyan")
@@ -883,13 +1158,17 @@ def main():
 
             elif exact == "/branch":
                 branch_save = [m.copy() for m in messages]
-                console.print(f"  [dim]conversation saved ({len(messages)} messages). use /restore to go back.[/]\n")
+                console.print(
+                    f"  [dim]conversation saved ({len(messages)} messages). use /restore to go back.[/]\n"
+                )
                 continue
 
             elif exact == "/restore":
                 if branch_save is not None:
                     messages = [m.copy() for m in branch_save]
-                    console.print(f"  [dim]restored to checkpoint ({len(messages)} messages)[/]\n")
+                    console.print(
+                        f"  [dim]restored to checkpoint ({len(messages)} messages)[/]\n"
+                    )
                 else:
                     console.print("  [dim]no checkpoint saved. use /branch first.[/]\n")
                 continue
@@ -897,13 +1176,22 @@ def main():
             elif exact == "/bench":
                 console.print("  [dim]running speed benchmark...[/]")
                 try:
-                    payload = json.dumps({
-                        "model": "local",
-                        "messages": [{"role": "user", "content": "Count from 1 to 50, one number per line."}],
-                        "max_tokens": 300, "temperature": 0.1,
-                    }).encode()
+                    payload = json.dumps(
+                        {
+                            "model": "local",
+                            "messages": [
+                                {
+                                    "role": "user",
+                                    "content": "Count from 1 to 50, one number per line.",
+                                }
+                            ],
+                            "max_tokens": 300,
+                            "temperature": 0.1,
+                        }
+                    ).encode()
                     req = urllib.request.Request(
-                        f"{SERVER}/v1/chat/completions", data=payload,
+                        f"{SERVER}/v1/chat/completions",
+                        data=payload,
                         headers={"Content-Type": "application/json"},
                     )
                     bstart = time.time()
@@ -915,8 +1203,12 @@ def main():
                     gen_speed = t.get("predicted_per_second", 0)
                     prompt_speed = t.get("prompt_per_second", 0)
                     tokens = u.get("completion_tokens", 0)
-                    console.print(f"  [bold bright_green]{gen_speed:.1f} tok/s[/] generation")
-                    console.print(f"  [bold bright_green]{prompt_speed:.1f} tok/s[/] prompt processing")
+                    console.print(
+                        f"  [bold bright_green]{gen_speed:.1f} tok/s[/] generation"
+                    )
+                    console.print(
+                        f"  [bold bright_green]{prompt_speed:.1f} tok/s[/] prompt processing"
+                    )
                     console.print(f"  [dim]{tokens} tokens in {belapsed:.1f}s[/]\n")
                 except Exception as e:
                     console.print(f"  [bold red]benchmark failed: {e}[/]\n")
@@ -925,10 +1217,14 @@ def main():
             elif exact == "/cost":
                 cloud_rate = 0.34  # $/hr RunPod equivalent
                 hours = session_time / 3600 if session_time > 0 else 0
-                saved = cloud_rate * max(hours, 1/60)
+                saved = cloud_rate * max(hours, 1 / 60)
                 console.print(f"  [bold bright_green]$0.00[/] spent locally")
-                console.print(f"  [dim]~${saved:.4f} would have cost on cloud GPU (${cloud_rate}/hr)[/]")
-                console.print(f"  [dim]session: {session_time:.0f}s · {session_tokens:,} tokens[/]\n")
+                console.print(
+                    f"  [dim]~${saved:.4f} would have cost on cloud GPU (${cloud_rate}/hr)[/]"
+                )
+                console.print(
+                    f"  [dim]session: {session_time:.0f}s · {session_tokens:,} tokens[/]\n"
+                )
                 continue
 
             elif exact == "/good":
@@ -946,7 +1242,9 @@ def main():
                 if last_interaction:
                     last_interaction["grade"] = "bad"
                     log_interaction(**last_interaction)
-                    console.print("  [bright_red]marked bad — logged for improvement[/]\n")
+                    console.print(
+                        "  [bright_red]marked bad — logged for improvement[/]\n"
+                    )
                 else:
                     console.print("  [dim]no response to grade[/]\n")
                 continue
@@ -996,7 +1294,9 @@ def main():
             if use_agent:
                 start = time.time()
                 # Use a separate session so it doesn't pollute main conversation
-                response, events = picoclaw_call_live(side_q, session=f"btw-{int(time.time())}")
+                response, events = picoclaw_call_live(
+                    side_q, session=f"btw-{int(time.time())}"
+                )
                 elapsed = time.time() - start
                 if response:
                     console.print(f"  [dim italic](side answer)[/]")
@@ -1009,12 +1309,17 @@ def main():
             else:
                 side_msgs = [{"role": "user", "content": side_q}]
                 try:
-                    payload = json.dumps({
-                        "model": "local", "messages": side_msgs,
-                        "max_tokens": 2000, "temperature": 0.7,
-                    }).encode()
+                    payload = json.dumps(
+                        {
+                            "model": "local",
+                            "messages": side_msgs,
+                            "max_tokens": 2000,
+                            "temperature": 0.7,
+                        }
+                    ).encode()
                     req = urllib.request.Request(
-                        f"{SERVER}/v1/chat/completions", data=payload,
+                        f"{SERVER}/v1/chat/completions",
+                        data=payload,
                         headers={"Content-Type": "application/json"},
                     )
                     with urllib.request.urlopen(req, timeout=120) as resp:
@@ -1045,13 +1350,17 @@ def main():
             try:
                 save_path = os.path.join(work_dir, filename)
                 with open(save_path, "w") as f:
-                    json.dump({
-                        "messages": messages,
-                        "session_id": session_id,
-                        "tokens": session_tokens,
-                        "time": session_time,
-                        "turns": session_turns,
-                    }, f, indent=2)
+                    json.dump(
+                        {
+                            "messages": messages,
+                            "session_id": session_id,
+                            "tokens": session_tokens,
+                            "time": session_time,
+                            "turns": session_turns,
+                        },
+                        f,
+                        indent=2,
+                    )
                 console.print(f"  [dim]saved to {save_path}[/]\n")
             except Exception as e:
                 console.print(f"  [bold red]{e}[/]\n")
@@ -1066,7 +1375,7 @@ def main():
             start = time.time()
             response, events = picoclaw_call_live(
                 f"Search the web for: {query}. Give a brief summary of the top results.",
-                session=f"search-{int(time.time())}"
+                session=f"search-{int(time.time())}",
             )
             elapsed = time.time() - start
             if response:
@@ -1086,7 +1395,9 @@ def main():
             # Parse: /loop 5m <prompt>
             parts = cmd[6:].strip().split(None, 1)
             if len(parts) < 2:
-                console.print("  [dim]/loop <interval> <prompt>  — e.g. /loop 5m check server status[/]\n")
+                console.print(
+                    "  [dim]/loop <interval> <prompt>  — e.g. /loop 5m check server status[/]\n"
+                )
                 continue
 
             interval_str, loop_prompt = parts
@@ -1119,7 +1430,9 @@ def main():
                     time.sleep(interval)
                     if not loop_running:
                         break
-                    console.print(f"\n  [dim italic]loop: running '{prompt[:40]}...'[/]")
+                    console.print(
+                        f"\n  [dim italic]loop: running '{prompt[:40]}...'[/]"
+                    )
                     resp, _ = picoclaw_call_live(prompt, session=sid)
                     if resp:
                         for line in resp.split("\n"):
@@ -1129,7 +1442,7 @@ def main():
             loop_thread = threading.Thread(
                 target=run_loop,
                 args=(loop_prompt, interval_sec, f"loop-{session_id}"),
-                daemon=True
+                daemon=True,
             )
             loop_thread.start()
             continue
@@ -1159,7 +1472,9 @@ def main():
             cls_thread = threading.Thread(target=do_classify, daemon=True)
             cls_thread.start()
 
-            with Live(display.render(), console=console, refresh_per_second=8, transient=True) as live:
+            with Live(
+                display.render(), console=console, refresh_per_second=8, transient=True
+            ) as live:
                 while cls_thread.is_alive():
                     display.frame += 1
                     live.update(display.render())
@@ -1184,7 +1499,12 @@ def main():
                 tool_thread = threading.Thread(target=do_tool, daemon=True)
                 tool_thread.start()
 
-                with Live(display.render(), console=console, refresh_per_second=8, transient=True) as live:
+                with Live(
+                    display.render(),
+                    console=console,
+                    refresh_per_second=8,
+                    transient=True,
+                ) as live:
                     while tool_thread.is_alive():
                         display.frame += 1
                         t = time.time() - start
@@ -1217,7 +1537,12 @@ def main():
                     session_tokens += len(response.split())
                     session_time += elapsed
                     session_turns += 1
-                    last_interaction = {"query": user_input, "intent": "shell", "response": response, "speed": speed}
+                    last_interaction = {
+                        "query": user_input,
+                        "intent": "shell",
+                        "response": response,
+                        "speed": speed,
+                    }
                     messages.append({"role": "user", "content": user_input})
                     messages.append({"role": "assistant", "content": response})
                 else:
@@ -1238,7 +1563,12 @@ def main():
                 search_thread = threading.Thread(target=do_search, daemon=True)
                 search_thread.start()
 
-                with Live(display.render(), console=console, refresh_per_second=8, transient=True) as live:
+                with Live(
+                    display.render(),
+                    console=console,
+                    refresh_per_second=8,
+                    transient=True,
+                ) as live:
                     while search_thread.is_alive():
                         display.frame += 1
                         t = time.time() - start
@@ -1271,7 +1601,12 @@ def main():
                     session_turns += 1
                     messages.append({"role": "user", "content": user_input})
                     messages.append({"role": "assistant", "content": response})
-                    last_interaction = {"query": user_input, "intent": "search", "response": response, "speed": speed}
+                    last_interaction = {
+                        "query": user_input,
+                        "intent": "search",
+                        "response": response,
+                        "speed": speed,
+                    }
                 else:
                     # Search failed, fall back to direct LLM
                     console.print("  [dim]search failed, asking model directly...[/]")
@@ -1280,7 +1615,12 @@ def main():
                     tokens = 0
                     first_token = True
                     display.phase = "thinking"
-                    with Live(display.render(), console=console, refresh_per_second=8, transient=True) as live:
+                    with Live(
+                        display.render(),
+                        console=console,
+                        refresh_per_second=8,
+                        transient=True,
+                    ) as live:
                         gen = stream_llm(messages)
                         for chunk in gen:
                             if isinstance(chunk, str):
@@ -1307,7 +1647,12 @@ def main():
                 display = WorkingDisplay()
                 display.phase = "thinking"
                 try:
-                    with Live(display.render(), console=console, refresh_per_second=8, transient=True) as live:
+                    with Live(
+                        display.render(),
+                        console=console,
+                        refresh_per_second=8,
+                        transient=True,
+                    ) as live:
                         gen = stream_llm(messages)
                         for chunk in gen:
                             if isinstance(chunk, str):
@@ -1342,7 +1687,12 @@ def main():
                 display.phase = "thinking"
                 first_token = True
 
-                with Live(display.render(), console=console, refresh_per_second=8, transient=True) as live:
+                with Live(
+                    display.render(),
+                    console=console,
+                    refresh_per_second=8,
+                    transient=True,
+                ) as live:
                     gen = stream_llm(messages)
                     for chunk in gen:
                         if isinstance(chunk, str):
@@ -1355,7 +1705,9 @@ def main():
                             tokens += 1
 
                 elapsed = time.time() - start
-                if not compact_mode and any(c in full for c in ["##", "**", "```", "- ", "1. "]):
+                if not compact_mode and any(
+                    c in full for c in ["##", "**", "```", "- ", "1. "]
+                ):
                     console.print("\n")
                     console.print(Padding(Markdown(full), (0, 2)))
                 else:
@@ -1382,6 +1734,7 @@ def main():
             f"  [dim]{session_turns} turns · {session_tokens:,} tokens · {avg:.1f} tok/s[/]"
         )
     console.print()
+
 
 if __name__ == "__main__":
     main()

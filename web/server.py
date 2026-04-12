@@ -12,13 +12,16 @@ import urllib.request
 
 try:
     from ddgs import DDGS
+
     HAS_DDGS = True
 except ImportError:
     try:
         from duckduckgo_search import DDGS
+
         HAS_DDGS = True
     except ImportError:
         HAS_DDGS = False
+
 
 def quick_search_and_answer(query):
     """Fast path: DuckDuckGo search + single LLM call. ~3s total."""
@@ -27,6 +30,7 @@ def quick_search_and_answer(query):
 
     # Search — append today's date for time-sensitive queries
     from datetime import datetime
+
     search_query = f"{query} today {datetime.now().strftime('%B %d, %Y')}"
 
     try:
@@ -39,18 +43,27 @@ def quick_search_and_answer(query):
         return None
 
     from datetime import datetime
+
     today = datetime.now().strftime("%A, %B %d, %Y")
 
     # Single LLM call with search context
-    payload = json.dumps({
-        "model": "local",
-        "messages": [
-            {"role": "system", "content": f"Today is {today}. Answer using the search results below. Extract specific dates, teams, scores, names, and numbers. Even if data is partial or abbreviated (like 'Mar. 23 at DET'), expand it into a clear answer (e.g., 'March 23 vs Detroit Pistons'). Be direct and confident. Never say 'not fully provided' — use what you have."},
-            {"role": "user", "content": f"Web search results:\n\n{search_text}\n\nBased on these results, answer: {query}"},
-        ],
-        "max_tokens": 1000,
-        "temperature": 0.1,
-    }).encode()
+    payload = json.dumps(
+        {
+            "model": "local",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": f"Today is {today}. Answer using the search results below. Extract specific dates, teams, scores, names, and numbers. Even if data is partial or abbreviated (like 'Mar. 23 at DET'), expand it into a clear answer (e.g., 'March 23 vs Detroit Pistons'). Be direct and confident. Never say 'not fully provided' — use what you have.",
+                },
+                {
+                    "role": "user",
+                    "content": f"Web search results:\n\n{search_text}\n\nBased on these results, answer: {query}",
+                },
+            ],
+            "max_tokens": 1000,
+            "temperature": 0.1,
+        }
+    ).encode()
 
     req = urllib.request.Request(
         "http://localhost:8000/v1/chat/completions",
@@ -68,28 +81,22 @@ def quick_search_and_answer(query):
         "search_results": len(results),
     }
 
+
 PORT = 8080
 LLM_URL = "http://localhost:8000/v1/chat/completions"
 PICOCLAW = os.path.expanduser("~/Desktop/qwen/picoclaw/build/picoclaw-darwin-arm64")
-ANSI_RE = re.compile(r'\x1b\[[0-9;]*m|\r')
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m|\r")
 
-# Model configs (same as agent.py)
-MODELS = {
-    "9b": {
-        "path": os.path.expanduser("~/models/Qwen3.5-9B-Q4_K_M.gguf"),
-        "ctx": 32768,
-        "flags": ["--flash-attn", "on", "--n-gpu-layers", "99", "--reasoning", "off", "-t", "4"],
-        "name": "Qwen3.5-9B",
-    },
-    "35b": {
-        "path": os.path.expanduser("~/models/Qwen3.5-35B-A3B-UD-IQ2_M.gguf"),
-        "ctx": 8192,
-        "flags": ["--flash-attn", "on", "--n-gpu-layers", "99", "--reasoning", "off", "-np", "1", "-t", "4"],
-        "name": "Qwen3.5-35B-A3B",
-    },
-}
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "mlx")
+)
+from model_registry import (
+    get_models as registry_get_models,
+    get_model as registry_get_model,
+)
 
-current_model = None  # detected on first request
+current_model = None
+
 
 def get_current_model():
     global current_model
@@ -106,21 +113,29 @@ def get_current_model():
         pass
     return current_model
 
+
 def swap_model(target):
     global current_model
-    cfg = MODELS.get(target)
-    if not cfg or not os.path.exists(cfg["path"]):
-        return False, f"Model not found: {target}"
+    cfg = registry_get_model(target)
+    if not cfg:
+        return False, f"Unknown model: {target}"
+    if not os.path.exists(cfg["path"]):
+        return False, f"Model file not found: {cfg['path']}"
 
     subprocess.run(["pkill", "-f", "llama-server"], capture_output=True)
     time.sleep(3)
 
     cmd = [
         "llama-server",
-        "--model", cfg["path"],
-        "--port", "8000", "--host", "127.0.0.1",
-        "--ctx-size", str(cfg["ctx"]),
-    ] + cfg["flags"]
+        "--model",
+        cfg["path"],
+        "--port",
+        "8000",
+        "--host",
+        "127.0.0.1",
+        "--ctx-size",
+        str(cfg["ctx"]),
+    ] + cfg["flags"].split()
     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     for i in range(30):
@@ -135,8 +150,8 @@ def swap_model(target):
             pass
     return False, "Server failed to start"
 
-class Handler(SimpleHTTPRequestHandler):
 
+class Handler(SimpleHTTPRequestHandler):
     def do_OPTIONS(self):
         """Handle CORS preflight."""
         self.send_response(200)
@@ -170,7 +185,8 @@ class Handler(SimpleHTTPRequestHandler):
 
         try:
             req = urllib.request.Request(
-                LLM_URL, data=body,
+                LLM_URL,
+                data=body,
                 headers={"Content-Type": "application/json"},
             )
             with urllib.request.urlopen(req, timeout=300) as resp:
@@ -207,11 +223,15 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_header("Content-Type", "application/json")
                 self._cors_headers()
                 self.end_headers()
-                self.wfile.write(json.dumps({
-                    "response": result["response"],
-                    "speed": result.get("speed", 0),
-                    "method": "fast",
-                }).encode())
+                self.wfile.write(
+                    json.dumps(
+                        {
+                            "response": result["response"],
+                            "speed": result.get("speed", 0),
+                            "method": "fast",
+                        }
+                    ).encode()
+                )
                 return
         except Exception as e:
             print(f"  Fast search failed: {e}, falling back to PicoClaw")
@@ -227,9 +247,11 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             result = subprocess.run(
                 [PICOCLAW, "agent", "-m", message, "-s", session],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True,
+                text=True,
+                timeout=120,
             )
-            clean = ANSI_RE.sub('', result.stdout)
+            clean = ANSI_RE.sub("", result.stdout)
             parts = clean.split("\U0001f99e")
             response = parts[-1].strip() if len(parts) >= 2 else clean.strip()
 
@@ -237,7 +259,9 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self._cors_headers()
             self.end_headers()
-            self.wfile.write(json.dumps({"response": response, "method": "picoclaw"}).encode())
+            self.wfile.write(
+                json.dumps({"response": response, "method": "picoclaw"}).encode()
+            )
 
         except Exception as e:
             self.send_response(500)
@@ -276,21 +300,25 @@ class Handler(SimpleHTTPRequestHandler):
             # Run PicoClaw with debug flag for live logs
             proc = subprocess.Popen(
                 [PICOCLAW, "agent", "-m", message, "-s", session, "-d"],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
             )
 
             all_output = []
             for line in proc.stdout:
                 all_output.append(line)
-                clean = ANSI_RE.sub('', line).strip()
+                clean = ANSI_RE.sub("", line).strip()
 
                 # Detect phase from log line
                 lower = clean.lower()
                 for keyword, phase in PHASE_MAP.items():
                     if keyword in lower:
                         # Send log event to browser
-                        event = json.dumps({"type": "log", "phase": phase, "detail": clean[:80]})
+                        event = json.dumps(
+                            {"type": "log", "phase": phase, "detail": clean[:80]}
+                        )
                         self.wfile.write(f"data: {event}\n\n".encode())
                         self.wfile.flush()
                         break
@@ -299,7 +327,7 @@ class Handler(SimpleHTTPRequestHandler):
 
             # Parse final response
             full = "".join(all_output)
-            clean = ANSI_RE.sub('', full)
+            clean = ANSI_RE.sub("", full)
             parts = clean.split("\U0001f99e")
             if len(parts) >= 2:
                 response = parts[-1].strip()
@@ -307,7 +335,9 @@ class Handler(SimpleHTTPRequestHandler):
                 response = ""
 
             # Send final response
-            event = json.dumps({"type": "response", "response": response, "session": session})
+            event = json.dumps(
+                {"type": "response", "response": response, "session": session}
+            )
             self.wfile.write(f"data: {event}\n\n".encode())
             self.wfile.write("data: [DONE]\n\n".encode())
             self.wfile.flush()
@@ -334,46 +364,71 @@ class Handler(SimpleHTTPRequestHandler):
         body = json.loads(self.rfile.read(length))
         target = body.get("model", "")
 
-        if target not in MODELS:
+        all_models = registry_get_models()
+        if target not in all_models:
             self.send_response(400)
             self.send_header("Content-Type", "application/json")
             self._cors_headers()
             self.end_headers()
-            self.wfile.write(json.dumps({"error": f"Unknown model: {target}. Use '9b' or '35b'"}).encode())
+            self.wfile.write(
+                json.dumps(
+                    {
+                        "error": f"Unknown model: {target}. Available: {list(all_models.keys())}"
+                    }
+                ).encode()
+            )
             return
 
         cur = get_current_model()
+        cfg = registry_get_model(target)
         if cur == target:
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self._cors_headers()
             self.end_headers()
-            self.wfile.write(json.dumps({"ok": True, "message": f"Already on {MODELS[target]['name']}", "model": target}).encode())
+            self.wfile.write(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "message": f"Already on {cfg['name'] if cfg else target}",
+                        "model": target,
+                    }
+                ).encode()
+            )
             return
 
-        print(f"  Swapping to {MODELS[target]['name']}...")
+        print(f"  Swapping to {cfg['name'] if cfg else target}...")
         ok, msg = swap_model(target)
 
         self.send_response(200 if ok else 500)
         self.send_header("Content-Type", "application/json")
         self._cors_headers()
         self.end_headers()
-        self.wfile.write(json.dumps({"ok": ok, "message": msg, "model": target}).encode())
+        self.wfile.write(
+            json.dumps({"ok": ok, "message": msg, "model": target}).encode()
+        )
 
     def _handle_status(self):
         """Return current model and server status."""
         cur = get_current_model()
-        cfg = MODELS.get(cur, {})
+        cfg = registry_get_model(cur) or {}
+        all_models = registry_get_models()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self._cors_headers()
         self.end_headers()
-        self.wfile.write(json.dumps({
-            "model": cur,
-            "name": cfg.get("name", "unknown"),
-            "ctx": cfg.get("ctx", 0),
-            "models_available": {k: os.path.exists(v["path"]) for k, v in MODELS.items()},
-        }).encode())
+        self.wfile.write(
+            json.dumps(
+                {
+                    "model": cur,
+                    "name": cfg.get("name", "unknown"),
+                    "ctx": cfg.get("ctx", 0),
+                    "models_available": {
+                        k: v.get("exists", False) for k, v in all_models.items()
+                    },
+                }
+            ).encode()
+        )
 
     def do_GET(self):
         """Serve static files from web/ directory."""
@@ -386,6 +441,7 @@ class Handler(SimpleHTTPRequestHandler):
         msg = format % args
         if "favicon" not in msg:
             print(f"  {msg}")
+
 
 if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
