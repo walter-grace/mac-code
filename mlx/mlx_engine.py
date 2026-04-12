@@ -14,7 +14,9 @@ import argparse
 import json
 import sys
 import os
+import re
 import time
+import uuid
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
@@ -52,32 +54,31 @@ def load_model(model_key="9b"):
     return model, tokenizer
 
 
-def generate(messages, max_tokens=2000, temperature=0.7, stream=False):
-    """Generate a response from the model."""
-    from mlx_lm import generate as mlx_generate
+STOP_TOKENS = ["</think", "<|im_end|>", "<|im_start|>"]
 
-    # Format messages into prompt
+
+def _clean_response(text):
+    for stop in STOP_TOKENS:
+        if stop in text:
+            text = text[: text.index(stop)]
+    text = re.sub(r"_latency.*?</low>", "", text, flags=re.DOTALL)
+    return text.strip()
+
+
+def generate(messages, max_tokens=2000, temperature=0.7, stream=False):
+    """Generate a response from the model. If stream=True, yields tokens."""
     prompt = format_chat(messages)
 
+    if stream:
+        return _generate_stream(prompt, max_tokens, temperature)
+
+    from mlx_lm import generate as mlx_generate
+
     t0 = time.time()
-    response = mlx_generate(
-        model, tokenizer, prompt=prompt,
-        max_tokens=max_tokens,
-    )
+    response = mlx_generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens)
     elapsed = time.time() - t0
 
-    # Strip special tokens
-    for stop in ["<|endoftext|>", "<|im_end|>", "<|im_start|>"]:
-        if stop in response:
-            response = response[:response.index(stop)]
-
-    # Strip thinking tags — extract content after </think>
-    import re
-    if "<think>" in response:
-        # Remove everything between <think> and </think>
-        response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL)
-    response = response.strip()
-
+    response = _clean_response(response)
     tokens = len(tokenizer.encode(response)) if response else 0
     speed = tokens / elapsed if elapsed > 0 else 0
 
@@ -87,6 +88,62 @@ def generate(messages, max_tokens=2000, temperature=0.7, stream=False):
         "elapsed": elapsed,
         "speed": speed,
     }
+
+
+def _generate_stream(prompt, max_tokens, temperature):
+    from mlx_lm import stream_generate as mlx_stream_generate
+
+    t0 = time.time()
+    full_text = ""
+    token_count = 0
+    in_thinking = False
+    thinking_ended = False
+
+    for chunk in mlx_stream_generate(
+        model, tokenizer, prompt=prompt, max_tokens=max_tokens, temp=temperature
+    ):
+        text = chunk.text if hasattr(chunk, "text") else str(chunk)
+        token_count += 1
+
+        if not thinking_ended:
+            if not in_thinking:
+                if "_latency" in text or full_text.endswith(""):
+                    in_thinking = True
+                    full_text += text
+                    continue
+                if "" in text or "" in text:
+                    thinking_ended = True
+                    full_text = ""
+                    continue
+                in_thinking = True
+                full_text += text
+                continue
+            else:
+                full_text += text
+                if "" in full_text or "" in full_text:
+                    thinking_ended = True
+                    remaining = re.sub(
+                        r".*?(?:|)", "", full_text, count=1, flags=re.DOTALL
+                    )
+                    full_text = ""
+                    if remaining:
+                        cleaned = _clean_response(remaining)
+                        if cleaned:
+                            yield cleaned
+                continue
+
+        for stop in STOP_TOKENS:
+            if stop in text:
+                text = text[: text.index(stop)]
+                if text:
+                    yield text
+                elapsed = time.time() - t0
+                return
+
+        if text:
+            yield text
+
+    elapsed = time.time() - t0
 
 
 def format_chat(messages):
@@ -122,12 +179,21 @@ def save_context(name, prompt_tokens=None, metadata=None):
 
     if prompt_tokens is not None:
         import mlx.core as mx
-        tokens = mx.array(prompt_tokens) if not isinstance(prompt_tokens, mx.array) else prompt_tokens
+
+        tokens = (
+            mx.array(prompt_tokens)
+            if not isinstance(prompt_tokens, mx.array)
+            else prompt_tokens
+        )
         logits = model(tokens[None], cache=cache)
         mx.eval(logits)
 
     # Save
-    meta = {"name": name, "model": model_name, "saved": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    meta = {
+        "name": name,
+        "model": model_name,
+        "saved": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
     if metadata:
         meta.update(metadata)
 
@@ -167,6 +233,13 @@ def load_context(name):
 class APIHandler(BaseHTTPRequestHandler):
     """OpenAI-compatible API handler."""
 
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
     def do_POST(self):
         path = urlparse(self.path).path
 
@@ -189,10 +262,14 @@ class APIHandler(BaseHTTPRequestHandler):
         if path == "/health":
             self._send_json({"status": "ok", "model": model_name})
         elif path == "/props":
-            self._send_json({
-                "model_alias": f"Qwen3.5-{model_name}-MLX",
-                "model_path": MODELS.get(model_name, ""),
-            })
+            self._send_json(
+                {
+                    "model_alias": f"Qwen3.5-{model_name}-MLX",
+                    "model_path": MODELS.get(model_name, ""),
+                }
+            )
+        elif path == "/v1/models":
+            self._handle_list_models()
         elif path == "/v1/context/list":
             self._handle_list_contexts()
         else:
@@ -215,9 +292,17 @@ class APIHandler(BaseHTTPRequestHandler):
 
         result = load_context(name)
         if result:
-            self._send_json({"ok": True, "load_time": result["load_time"], "metadata": result["metadata"]})
+            self._send_json(
+                {
+                    "ok": True,
+                    "load_time": result["load_time"],
+                    "metadata": result["metadata"],
+                }
+            )
         else:
-            self._send_json({"ok": False, "error": f"Context not found: {name}"}, status=404)
+            self._send_json(
+                {"ok": False, "error": f"Context not found: {name}"}, status=404
+            )
 
     def _handle_upload_context(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -225,6 +310,7 @@ class APIHandler(BaseHTTPRequestHandler):
         name = body.get("name", "")
 
         from r2_store import upload_context
+
         result = upload_context(name)
         self._send_json(result)
 
@@ -234,14 +320,35 @@ class APIHandler(BaseHTTPRequestHandler):
         name = body.get("name", "")
 
         from r2_store import download_context
+
         result = download_context(name)
         self._send_json(result)
 
     def _handle_list_contexts(self):
         from r2_store import list_local_contexts, list_remote_contexts, is_configured
+
         local = list_local_contexts()
         remote = list_remote_contexts() if is_configured() else []
-        self._send_json({"local": local, "remote": remote, "r2_configured": is_configured()})
+        self._send_json(
+            {"local": local, "remote": remote, "r2_configured": is_configured()}
+        )
+
+    def _handle_list_models(self):
+        current = model_name or "9b"
+        model_id = MODELS.get(current, current)
+        self._send_json(
+            {
+                "object": "list",
+                "data": [
+                    {
+                        "id": model_id,
+                        "object": "model",
+                        "created": int(time.time()),
+                        "owned_by": "local",
+                    }
+                ],
+            }
+        )
 
     def _handle_chat(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -250,18 +357,27 @@ class APIHandler(BaseHTTPRequestHandler):
         messages = body.get("messages", [])
         max_tokens = body.get("max_tokens", 2000)
         temperature = body.get("temperature", 0.7)
+        stream = body.get("stream", False)
 
+        if stream:
+            self._handle_chat_stream(messages, max_tokens, temperature)
+        else:
+            self._handle_chat_sync(messages, max_tokens, temperature)
+
+    def _handle_chat_sync(self, messages, max_tokens, temperature):
         try:
             result = generate(messages, max_tokens, temperature)
 
             response = {
-                "choices": [{
-                    "message": {
-                        "role": "assistant",
-                        "content": result["content"],
-                    },
-                    "finish_reason": "stop",
-                }],
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": result["content"],
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
                 "usage": {
                     "completion_tokens": result["tokens"],
                 },
@@ -275,6 +391,82 @@ class APIHandler(BaseHTTPRequestHandler):
 
         except Exception as e:
             self._send_json({"error": {"message": str(e)}}, status=500)
+
+    def _handle_chat_stream(self, messages, max_tokens, temperature):
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+            created = int(time.time())
+
+            t0 = time.time()
+            token_count = 0
+            full_content = ""
+
+            for text_chunk in generate(messages, max_tokens, temperature, stream=True):
+                token_count += 1
+                full_content += text_chunk
+
+                sse_data = json.dumps(
+                    {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model_name or "local",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": text_chunk},
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                )
+                self.wfile.write(f"data: {sse_data}\n\n".encode())
+                self.wfile.flush()
+
+            elapsed = time.time() - t0
+            speed = token_count / elapsed if elapsed > 0 else 0
+
+            final_chunk = json.dumps(
+                {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_name or "local",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "timings": {
+                        "predicted_per_second": speed,
+                        "predicted_ms": elapsed * 1000,
+                    },
+                    "usage": {
+                        "completion_tokens": token_count,
+                    },
+                }
+            )
+            self.wfile.write(f"data: {final_chunk}\n\n".encode())
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+
+        except Exception as e:
+            error_data = json.dumps({"error": {"message": str(e)}})
+            try:
+                self.wfile.write(f"data: {error_data}\n\n".encode())
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+            except BrokenPipeError:
+                pass
 
     def _send_json(self, data, status=200):
         self.send_response(status)
@@ -291,8 +483,12 @@ class APIHandler(BaseHTTPRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser(description="MLX engine for mac code")
-    parser.add_argument("--model", default="9b", choices=list(MODELS.keys()),
-                       help="Model to load (default: 9b)")
+    parser.add_argument(
+        "--model",
+        default="9b",
+        choices=list(MODELS.keys()),
+        help="Model to load (default: 9b)",
+    )
     parser.add_argument("--port", default=8000, type=int)
     parser.add_argument("--save-context", help="Save KV cache after loading")
     parser.add_argument("--load-context", help="Load KV cache before serving")
@@ -309,10 +505,13 @@ def main():
     # Load context from disk if requested
     if args.load_context:
         from kv_cache import load_kv_cache
+
         tensors, meta = load_kv_cache(args.load_context)
         if tensors:
             set_kv_cache(tensors)
-            print(f"  Loaded context: {args.load_context} ({meta.get('num_layers', '?')} layers)")
+            print(
+                f"  Loaded context: {args.load_context} ({meta.get('num_layers', '?')} layers)"
+            )
         else:
             print(f"  Context not found: {args.load_context}")
 
