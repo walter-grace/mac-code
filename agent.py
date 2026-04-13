@@ -3,7 +3,7 @@
 mac code — claude code for your Mac
 """
 
-import json, sys, os, time, subprocess, re, threading, queue
+import json, sys, os, time, subprocess, re, threading, queue, codecs
 import urllib.request, random
 from datetime import datetime
 from pathlib import Path
@@ -543,11 +543,13 @@ def stream_llm(messages):
 
     with urllib.request.urlopen(req, timeout=300) as resp:
         buf = ""
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         while True:
-            ch = resp.read(1)
+            ch = resp.read(4096)
             if not ch:
+                buf += decoder.decode(b"", final=True)
                 break
-            buf += ch.decode("utf-8", errors="replace")
+            buf += decoder.decode(ch)
             while "\n" in buf:
                 line, buf = buf.split("\n", 1)
                 line = line.strip()
