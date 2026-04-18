@@ -58,7 +58,7 @@ def get_failure_stats():
                     intents[entry["intent"]] = intents.get(entry["intent"], 0) + 1
                 if entry.get("error"):
                     errors += 1
-            except:
+            except Exception:
                 pass
 
     return {"total": total, "graded": graded, "intents": intents, "errors": errors}

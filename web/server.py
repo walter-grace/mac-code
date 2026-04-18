@@ -102,7 +102,7 @@ def get_current_model():
             current_model = "35b"
         elif "9B" in alias:
             current_model = "9b"
-    except:
+    except Exception:
         pass
     return current_model
 
@@ -131,7 +131,7 @@ def swap_model(target):
                 if json.loads(r.read()).get("status") == "ok":
                     current_model = target
                     return True, f"Switched to {cfg['name']}"
-        except:
+        except Exception:
             pass
     return False, "Server failed to start"
 
@@ -325,7 +325,7 @@ class Handler(SimpleHTTPRequestHandler):
                 self.wfile.write(f"data: {event}\n\n".encode())
                 self.wfile.write("data: [DONE]\n\n".encode())
                 self.wfile.flush()
-            except:
+            except Exception:
                 pass
 
     def _handle_swap(self):
