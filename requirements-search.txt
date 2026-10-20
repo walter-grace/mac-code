@@ -1,0 +1,3 @@
+# Optional Parallel backend for agent.py (Python 3.10+).
+mcp>=1.30,<2
+httpx>=0.28,<1
