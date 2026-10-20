@@ -176,6 +176,32 @@ This is verification speed (checking draft tokens), not generation speed. Useful
 
 ---
 
+## Optional Parallel search
+
+The production agent's automatic search routing uses DuckDuckGo by default.
+For [Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp),
+install the optional dependency and select it when starting the agent:
+
+```bash
+pip3 install -r requirements-search.txt
+MAC_CODE_SEARCH_PROVIDER=parallel python3 agent.py
+```
+
+Ask a question that needs current web information in agent mode. Parallel searches
+in Fast mode and fetches the top page over Streamable HTTP, then passes source
+excerpts and URLs to your local model for an answer. No Parallel account or API key
+is needed. Your query and the fetched URL are sent to Parallel; model inference
+still runs locally. Free service limits apply. Connection, timeout and service
+errors are shown without switching providers.
+
+Unset `MAC_CODE_SEARCH_PROVIDER` or set it to `duckduckgo` to use the existing
+search path. Set it to `none` to disable automatic web search. `/raw` still bypasses
+tools. This setting applies to automatic search routing only; `/search`, `/btw`
+and `/loop` continue to use your separate PicoClaw setup and its tool permissions.
+`/clear` starts a fresh search conversation as well as clearing local history.
+
+---
+
 ## Files
 
 ### Top-level (daily use)
